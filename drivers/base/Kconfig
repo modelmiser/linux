@@ -159,6 +159,19 @@ config DEBUG_DEVRES
 
 	  If you are unsure about this, Say N here.
 
+config DEBUG_DEVRES_REFS
+	bool "Warn when managed memory is still referenced by open files at release"
+	depends on DEBUG_KERNEL
+	help
+	  When a device's managed resources are released (normally on
+	  driver unbind), walk the open files of every task and warn if a
+	  file's private_data or its inode's i_private still points into a
+	  managed allocation that is about to be freed. Such a pointer is a
+	  use-after-free waiting for the next file operation, typically
+	  close(). This is a slow debug check intended for test systems.
+
+	  If you are unsure about this, say N here.
+
 config DEBUG_TEST_DRIVER_REMOVE
 	bool "Test driver remove calls during probe (UNSTABLE)"
 	depends on DEBUG_KERNEL

@@ -10,6 +10,9 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/percpu.h>
+#include <linux/file.h>
+#include <linux/fs.h>
+#include <linux/sched/signal.h>
 
 #include <asm/sections.h>
 
@@ -537,6 +540,77 @@ static int remove_nodes(struct device *dev,
 	return cnt;
 }
 
+#ifdef CONFIG_DEBUG_DEVRES_REFS
+static struct devres_node *devres_find_containing(struct list_head *nodes,
+						  const void *p)
+{
+	struct devres_node *node;
+
+	if (!p)
+		return NULL;
+
+	list_for_each_entry(node, nodes, entry) {
+		struct devres *dr;
+
+		if (node->release != dr_node_release)
+			continue;
+		dr = container_of(node, struct devres, node);
+		if (p >= (void *)dr->data && p < (void *)dr->data + node->size)
+			return node;
+	}
+	return NULL;
+}
+
+static void devres_check_file_ref(struct device *dev, struct list_head *nodes,
+				  struct task_struct *task, unsigned int fd,
+				  struct file *file, const char *what,
+				  const void *p)
+{
+	struct devres_node *node = devres_find_containing(nodes, p);
+
+	if (!node)
+		return;
+
+	dev_WARN(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pd) in %s[%d] at release\n",
+		 node->name, node->size, what, fd, file->f_path.dentry,
+		 task->comm, task_pid_nr(task));
+}
+
+/*
+ * Walk every task's open files and warn about any that still point
+ * into a managed allocation that is about to be freed. Called with no
+ * locks held, from the process context that is releasing the device.
+ */
+static void devres_check_file_refs(struct device *dev, struct list_head *nodes)
+{
+	struct task_struct *task;
+
+	if (list_empty(nodes))
+		return;
+
+	rcu_read_lock();
+	for_each_process(task) {
+		unsigned int fd = 0;
+		struct file *file;
+
+		while ((file = fget_task_next(task, &fd))) {
+			devres_check_file_ref(dev, nodes, task, fd, file,
+					      "private_data",
+					      file->private_data);
+			devres_check_file_ref(dev, nodes, task, fd, file,
+					      "i_private",
+					      file_inode(file)->i_private);
+			fput(file);
+			fd++;
+		}
+	}
+	rcu_read_unlock();
+}
+#else
+static inline void devres_check_file_refs(struct device *dev,
+					  struct list_head *nodes) { }
+#endif /* CONFIG_DEBUG_DEVRES_REFS */
+
 static void release_nodes(struct device *dev, struct list_head *todo)
 {
 	struct devres_node *node, *tmp;
@@ -573,6 +647,7 @@ int devres_release_all(struct device *dev)
 	cnt = remove_nodes(dev, dev->devres_head.next, &dev->devres_head, &todo);
 	spin_unlock_irqrestore(&dev->devres_lock, flags);
 
+	devres_check_file_refs(dev, &todo);
 	release_nodes(dev, &todo);
 	return cnt;
 }
