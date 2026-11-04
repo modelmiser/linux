@@ -23,3 +23,18 @@ config DRIVER_SWNODE_KUNIT_TEST
 	tristate "KUnit Tests for software node fw_devlink links" if !KUNIT_ALL_TESTS
 	depends on KUNIT
 	default KUNIT_ALL_TESTS
+
+config DEVM_REFS_TEST
+	tristate "Test driver for DEBUG_DEVRES_REFS"
+	depends on DEBUG_DEVRES_REFS && DEBUG_FS
+	help
+	  Registers a platform device whose driver exposes /dev/devm_refs_bad
+	  (state in devm memory, freed on unbind while open),
+	  /dev/devm_refs_good (refcounted state), /dev/devm_refs_cdev (a
+	  struct cdev embedded in devm memory) and a debugfs file bad_magic
+	  whose data is that devm memory and whose removal is a devres
+	  action. Unbinding with all four open must warn once for the bad
+	  node and once for the cdev, and report the debugfs file at info
+	  level after release. See drivers/base/test/devm_refs_test.c.
+
+	  If unsure say N.
