@@ -1235,6 +1235,32 @@ EXPORT_SYMBOL_GPL(video_device_pipeline);
 /*
  *	Initialise video for linux
  */
+/*
+ * For CONFIG_DEBUG_DEVRES_REFS: an open V4L2 file keeps its struct
+ * video_device alive via video_get(), and reaches it only through
+ * video_devdata(), a lookup in video_devices[] that does not touch the
+ * video_device itself. The driver's state behind video_get_drvdata() is
+ * not named: reaching it means dereferencing the video_device, which
+ * may itself sit in managed memory already freed by an earlier unbind.
+ * Defined unconditionally; the registration calls are stubs when the
+ * option is off.
+ */
+static const void *v4l2_devres_open_file_holder(struct file *file,
+						unsigned int idx,
+						const char **what)
+{
+	if (idx)
+		return NULL;
+	*what = "video_devdata";
+	return video_devdata(file);
+}
+
+static struct devres_open_file_hook v4l2_devres_open_file_hook = {
+	.fops = &v4l2_fops,
+	.owner = THIS_MODULE,
+	.holder = v4l2_devres_open_file_holder,
+};
+
 static int __init videodev_init(void)
 {
 	dev_t dev = MKDEV(VIDEO_MAJOR, 0);
@@ -1255,12 +1281,17 @@ static int __init videodev_init(void)
 		return -EIO;
 	}
 
+	/* Last, so no failure above can leave the hook registered. */
+	WARN_ON(devres_register_open_file_hook(&v4l2_devres_open_file_hook));
+
 	return 0;
 }
 
 static void __exit videodev_exit(void)
 {
 	dev_t dev = MKDEV(VIDEO_MAJOR, 0);
+
+	devres_unregister_open_file_hook(&v4l2_devres_open_file_hook);
 
 	class_unregister(&video_class);
 	unregister_chrdev_region(dev, VIDEO_NUM_DEVICES);
