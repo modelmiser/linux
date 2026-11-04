@@ -1375,6 +1375,7 @@ void debugfs_create_devm_seqfile(struct device *dev, const char *name,
 }
 EXPORT_SYMBOL_GPL(debugfs_create_devm_seqfile);
 
+#ifdef CONFIG_DEBUG_DEVRES_REFS
 /*
  * debugfs's own file_operations for _unsafe files on which nothing after
  * open can reach the driver's data: either every operation takes the
@@ -1403,8 +1404,9 @@ static bool debugfs_unsafe_fops_safe_after_removal(const struct file_operations 
 /**
  * debugfs_file_revoked - has debugfs cut @file off from its driver?
  * @file: an open file, held by the caller
- * @real_fops: set to the file_operations whose release callback close()
- *             will still run, or NULL if there are none
+ * @real_fops: set to the file_operations close() will still consult, or
+ *             NULL for a short-fops proxy; callers must still test
+ *             ->release, which may be NULL
  *
  * For debugging aids that find a stale pointer behind an open debugfs file
  * after the file was removed; not for use elsewhere.
@@ -1412,7 +1414,8 @@ static bool debugfs_unsafe_fops_safe_after_removal(const struct file_operations 
  * Return: true if @file is a removed debugfs file on which no further
  * operation can reach the driver's data: one created through the full
  * proxy (debugfs_create_file() and the helpers built on it), on which
- * read/write/ioctl/poll return -EIO (see __debugfs_file_get()); or one of
+ * read/write/llseek/ioctl fail with -EIO and poll reports EPOLLHUP (see
+ * __debugfs_file_get()); or one of
  * the _unsafe files whose read/write callbacks are debugfs's own guarded
  * ones (the DEFINE_DEBUGFS_ATTRIBUTE() family, blobs, bools, strings) or
  * which copy their data at open (u32 arrays). close() still runs the real
@@ -1447,3 +1450,4 @@ bool debugfs_file_revoked(const struct file *file,
 	}
 	return false;
 }
+#endif /* CONFIG_DEBUG_DEVRES_REFS */

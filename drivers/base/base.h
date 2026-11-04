@@ -242,10 +242,32 @@ void devres_for_each_res(struct device *dev, dr_release_t release,
 			 void (*fn)(struct device *, void *, void *),
 			 void *data);
 int devres_release_all(struct device *dev);
+/* CONFIG_DEBUG_DEVRES_REFS state carried across devres_release_all() */
+struct devres_open_file_check {
 #ifdef CONFIG_DEBUG_DEVRES_REFS
-void devres_check_open_files(struct device *dev);
+	struct devres_region *regions;
+	unsigned int nr;
+	struct files_struct **seen;
+	unsigned int nseen, maxseen;
+	struct list_head pending;
+#endif
+};
+
+#ifdef CONFIG_DEBUG_DEVRES_REFS
+void devres_check_open_files(struct device *dev,
+			     struct devres_open_file_check *chk);
+void devres_finish_open_file_check(struct device *dev,
+				   struct devres_open_file_check *chk);
 #else
-static inline void devres_check_open_files(struct device *dev) { }
+static inline void devres_check_open_files(struct device *dev,
+					   struct devres_open_file_check *chk)
+{
+}
+
+static inline void devres_finish_open_file_check(struct device *dev,
+						 struct devres_open_file_check *chk)
+{
+}
 #endif
 void device_block_probing(void);
 void device_unblock_probing(void);

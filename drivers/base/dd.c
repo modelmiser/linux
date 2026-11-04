@@ -593,10 +593,13 @@ static DEVICE_ATTR_RW(state_synced);
 
 static void device_unbind_cleanup(struct device *dev)
 {
+	struct devres_open_file_check chk = {};
+
 	if (dev->driver->p_cb.post_unbind_rust)
 		dev->driver->p_cb.post_unbind_rust(dev);
-	devres_check_open_files(dev);
+	devres_check_open_files(dev, &chk);
 	devres_release_all(dev);
+	devres_finish_open_file_check(dev, &chk);
 	arch_teardown_dma_ops(dev);
 	kfree(dev->dma_range_map);
 	dev->dma_range_map = NULL;

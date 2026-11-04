@@ -11,14 +11,14 @@
 #include <linux/slab.h>
 #include <linux/percpu.h>
 #include <linux/debugfs.h>
+#include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/magic.h>
 #include <linux/pid.h>
 #include <linux/pid_namespace.h>
 #include <linux/sched.h>
-#include <linux/sched/signal.h>
 #include <linux/sched/task.h>
-#include <linux/timekeeping.h>
 
 #include <asm/sections.h>
 
@@ -551,11 +551,19 @@ static int remove_nodes(struct device *dev,
  * CONFIG_DEBUG_DEVRES_REFS: before a driver's managed memory is freed, find
  * open files that still point into it.
  *
- * Runs from device_unbind_cleanup() only, i.e. on driver unbind and after a
- * failed probe: process context, device_lock held, before
- * devres_release_all(). It is deliberately not run from
+ * Two phases around devres_release_all(), both from device_unbind_cleanup()
+ * only, i.e. on driver unbind and after a failed probe, in process context
+ * with device_lock held. It is deliberately not run from
  * devres_release_all() itself, which is also reached from device_release()
  * and so from any context in which a final put_device() is legal.
+ *
+ * Phase 1 (devres_check_open_files) snapshots the regions and walks every
+ * fd table. A hit on an ordinary file is a WARN at once. A hit on a debugfs
+ * file is decided by whether debugfs has revoked the file: if already
+ * removed, info now; if still live, the verdict waits, because many drivers
+ * remove their debugfs files through a devres action that runs inside
+ * devres_release_all(). Phase 2 (devres_finish_open_file_check) revisits
+ * those after release: removed by then is info, still live is a WARN.
  */
 static LIST_HEAD(devres_open_file_hooks);
 /* Lock order: device_lock(dev) -> devres_open_file_hooks_lock -> task_lock(). */
@@ -615,10 +623,21 @@ struct devres_region {
 	bool warned;
 };
 
+/* A hit on a live debugfs file, decided after devres_release_all(). */
+struct devres_pending_ref {
+	struct list_head list;
+	struct file *file;
+	struct devres_region *region;
+	const char *what;
+	char comm[TASK_COMM_LEN];
+	pid_t pnr;
+	unsigned int fd;
+};
+
 /*
  * Copy the data regions of @dev's managed allocations. Taken before
- * devres_release_all() so the walk below never holds devres_lock and
- * never looks at a node that is being freed.
+ * devres_release_all() so the walk never holds devres_lock and never looks
+ * at a node that is being freed.
  */
 static unsigned int devres_snapshot_regions(struct device *dev,
 					    struct devres_region **out)
@@ -685,52 +704,84 @@ static struct devres_region *devres_region_containing(struct devres_region *r,
 	return NULL;
 }
 
+#define DEVRES_REF_FMT "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pD3) in %s[%d]"
+
+/* One backtrace per allocation; further holders get one line each. */
+static void devres_warn_ref(struct device *dev, struct devres_region *region,
+			    const char *what, unsigned int fd,
+			    struct file *file, const char *comm, pid_t pnr,
+			    const char *why)
+{
+	if (!region->warned) {
+		region->warned = true;
+		dev_WARN(dev, DEVRES_REF_FMT " at unbind%s\n", region->name,
+			 region->size, what, fd, file, comm, pnr, why);
+	} else {
+		dev_warn(dev, DEVRES_REF_FMT " at unbind%s\n", region->name,
+			 region->size, what, fd, file, comm, pnr, why);
+	}
+}
+
+static void devres_report_revoked(struct device *dev,
+				  struct devres_region *region,
+				  const char *what, unsigned int fd,
+				  struct file *file, const char *comm,
+				  pid_t pnr, const struct file_operations *fops,
+				  const char *when)
+{
+	if (fops && fops->release)
+		dev_info(dev, DEVRES_REF_FMT " at unbind: debugfs file removed %s, ops refused by debugfs, close will still call %ps\n",
+			 region->name, region->size, what, fd, file, comm,
+			 pnr, when, fops->release);
+	else
+		dev_info(dev, DEVRES_REF_FMT " at unbind: debugfs file removed %s, ops refused by debugfs, no release callback\n",
+			 region->name, region->size, what, fd, file, comm,
+			 pnr, when);
+}
+
 static void devres_report_open_file(struct device *dev,
+				    struct devres_open_file_check *chk,
 				    struct devres_region *region,
 				    struct task_struct *task, pid_t pnr,
 				    unsigned int fd, struct file *file,
 				    const char *what)
 {
 	const struct file_operations *real_fops;
+	struct devres_pending_ref *pend;
 	char comm[TASK_COMM_LEN];
 
 	get_task_comm(comm, task);
 
-	/*
-	 * A removed debugfs file that debugfs itself cuts off from the
-	 * driver (see debugfs_file_revoked()) refuses read/write/ioctl/poll
-	 * with -EIO. Report it and name the release callback that close()
-	 * will still run, but do not warn.
-	 */
+	/* Already removed and guarded by debugfs: info now. */
 	if (debugfs_file_revoked(file, &real_fops)) {
-		if (real_fops && real_fops->release)
-			dev_info(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pD3) in %s[%d] at unbind: removed debugfs file, ops refused by debugfs, close will still call %ps\n",
-				 region->name, region->size, what, fd, file,
-				 comm, pnr, real_fops->release);
-		else
-			dev_info(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pD3) in %s[%d] at unbind: removed debugfs file, ops refused by debugfs, no release callback\n",
-				 region->name, region->size, what, fd, file,
-				 comm, pnr);
+		devres_report_revoked(dev, region, what, fd, file, comm, pnr,
+				      real_fops, "in remove()");
 		return;
 	}
 
-	/* One backtrace per allocation; further holders get one line each. */
-	if (!region->warned) {
-		region->warned = true;
-		dev_WARN(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pD3) in %s[%d] at unbind\n",
-			 region->name, region->size, what, fd, file, comm,
-			 pnr);
-	} else {
-		dev_warn(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pD3) in %s[%d] at unbind\n",
-			 region->name, region->size, what, fd, file, comm,
-			 pnr);
+	/* Live debugfs file: a devres action may still remove it. Defer. */
+	if (file_inode(file)->i_sb->s_magic == DEBUGFS_MAGIC) {
+		pend = kzalloc_obj(*pend);
+		if (pend) {
+			pend->file = get_file(file);
+			pend->region = region;
+			pend->what = what;
+			strscpy(pend->comm, comm, sizeof(pend->comm));
+			pend->pnr = pnr;
+			pend->fd = fd;
+			list_add_tail(&pend->list, &chk->pending);
+			return;
+		}
+		/* No memory to defer: report now, as a plain warning. */
 	}
+
+	devres_warn_ref(dev, region, what, fd, file, comm, pnr, "");
 }
 
 static void devres_check_one_file(struct device *dev,
-				  struct devres_region *regions,
-				  unsigned int nr, struct task_struct *task,
-				  pid_t pnr, unsigned int fd, struct file *file)
+				  struct devres_open_file_check *chk,
+				  struct task_struct *task, pid_t pnr,
+				  unsigned int fd, struct file *file)
 {
 	struct devres_open_file_hook *hook;
 	struct devres_region *region;
@@ -741,86 +792,101 @@ static void devres_check_one_file(struct device *dev,
 		return;
 
 	pd = READ_ONCE(file->private_data);
-	region = devres_region_containing(regions, nr, pd);
+	region = devres_region_containing(chk->regions, chk->nr, pd);
 	if (region)
-		devres_report_open_file(dev, region, task, pnr, fd, file,
+		devres_report_open_file(dev, chk, region, task, pnr, fd, file,
 					"private_data");
 
 	ip = READ_ONCE(file_inode(file)->i_private);
 	if (ip != pd) {
-		region = devres_region_containing(regions, nr, ip);
+		region = devres_region_containing(chk->regions, chk->nr, ip);
 		if (region)
-			devres_report_open_file(dev, region, task, pnr, fd, file,
-						"i_private");
+			devres_report_open_file(dev, chk, region, task, pnr,
+						fd, file, "i_private");
 	}
 
 	list_for_each_entry(hook, &devres_open_file_hooks, list) {
 		if (file->f_op != hook->fops)
 			continue;
-		region = devres_region_containing(regions, nr,
+		region = devres_region_containing(chk->regions, chk->nr,
 						  hook->holder(file));
 		if (region)
-			devres_report_open_file(dev, region, task, pnr, fd, file,
-						hook->name);
+			devres_report_open_file(dev, chk, region, task, pnr,
+						fd, file, hook->name);
 	}
 }
 
 /*
- * Is @task's fd table already walked through another thread of its group?
- * Called under rcu_read_lock() with @task still hashed, so its group
- * leader and siblings cannot have been freed. Threads are visited in pid
- * order, so among the threads that existed when the walk started the
- * lowest-pid live one sharing a table is the one walked. A thread created
- * during the walk may have a lower pid (pid allocation wraps) without
- * having been visited, so it never counts as covering another.
+ * Each fd table is walked once. Tables already walked are kept pinned in
+ * chk->seen (so their addresses cannot be reused) until the walk ends;
+ * the set grows as needed and, if growth fails, later sharers of a table
+ * are walked again, which costs duplicate lines only.
  */
-static bool devres_fd_table_covered(struct task_struct *task, pid_t nr,
-				    u64 walk_start)
+static bool devres_fd_table_seen(struct devres_open_file_check *chk,
+				 struct files_struct *files)
 {
-	struct files_struct *files = READ_ONCE(task->files);
-	struct task_struct *t;
+	unsigned int i;
 
-	if (!files)
-		return true;	/* exiting: nothing to walk */
-
-	for_each_thread(task, t) {
-		pid_t tnr = task_pid_nr(t);
-
-		if (t != task && tnr && tnr < nr &&
-		    READ_ONCE(t->files) == files &&
-		    READ_ONCE(t->start_boottime) < walk_start)
+	for (i = 0; i < chk->nseen; i++)
+		if (chk->seen[i] == files)
 			return true;
-	}
 	return false;
 }
 
+static void devres_fd_table_mark(struct devres_open_file_check *chk,
+				 struct task_struct *task)
+{
+	struct files_struct *files, **seen;
+
+	if (chk->nseen == chk->maxseen) {
+		unsigned int max = chk->maxseen ? chk->maxseen * 2 : 64;
+
+		seen = krealloc_array(chk->seen, max, sizeof(*seen),
+				      GFP_KERNEL);
+		if (!seen)
+			return;
+		chk->seen = seen;
+		chk->maxseen = max;
+	}
+
+	task_lock(task);
+	files = task->files;
+	if (files && !devres_fd_table_seen(chk, files)) {
+		atomic_inc(&files->count);
+		chk->seen[chk->nseen++] = files;
+	}
+	task_unlock(task);
+}
+
 /**
- * devres_check_open_files - warn about open files into memory about to be freed
+ * devres_check_open_files - find open files into memory about to be freed
  * @dev: device being unbound; its managed resources are still allocated
+ * @chk: zero-initialised state, passed on to devres_finish_open_file_check()
  *
  * Walk every thread's open files and report any that still point into one
  * of @dev's managed allocations, which devres_release_all() is about to
  * free. Must be called in process context with no spinlocks held; the walk
  * can sleep, reschedules between tasks, and holds only one task reference
- * and one file reference at a time.
+ * and one file reference at a time (plus pinned fd tables and deferred
+ * debugfs files, released in devres_finish_open_file_check()).
  *
- * Holding that file reference means that if the owner closes the file
+ * Holding a file reference means that if the owner closes the file
  * meanwhile, the final fput() (and so the driver's release callback) runs
  * from this context's deferred fput (task work, or the delayed-fput work
  * item when called from a kthread such as the deferred-probe worker)
  * instead of the owner's close(). The file was reported either way; only
  * where its release runs moves.
  */
-void devres_check_open_files(struct device *dev)
+void devres_check_open_files(struct device *dev,
+			     struct devres_open_file_check *chk)
 {
-	struct devres_region *regions = NULL;
-	u64 walk_start = ktime_get_boottime_ns();
-	unsigned int nr, tid = 0;
+	unsigned int tid = 0;
 
 	might_sleep();
 
-	nr = devres_snapshot_regions(dev, &regions);
-	if (!nr)
+	INIT_LIST_HEAD(&chk->pending);
+	chk->nr = devres_snapshot_regions(dev, &chk->regions);
+	if (!chk->nr)
 		return;
 
 	mutex_lock(&devres_open_file_hooks_lock);
@@ -840,7 +906,8 @@ void devres_check_open_files(struct device *dev)
 		pnr = pid_nr(pid);
 		tid = pnr + 1;
 		task = pid_task(pid, PIDTYPE_PID);
-		if (task && !devres_fd_table_covered(task, pnr, walk_start))
+		if (task && READ_ONCE(task->files) &&
+		    !devres_fd_table_seen(chk, READ_ONCE(task->files)))
 			get_task_struct(task);
 		else
 			task = NULL;
@@ -848,9 +915,9 @@ void devres_check_open_files(struct device *dev)
 		if (!task)
 			continue;
 
+		devres_fd_table_mark(chk, task);
 		while ((file = fget_task_next(task, &fd))) {
-			devres_check_one_file(dev, regions, nr, task, pnr, fd,
-					      file);
+			devres_check_one_file(dev, chk, task, pnr, fd, file);
 			fput(file);
 			fd++;
 		}
@@ -859,7 +926,48 @@ void devres_check_open_files(struct device *dev)
 	}
 	mutex_unlock(&devres_open_file_hooks_lock);
 
-	kfree(regions);
+	while (chk->nseen)
+		put_files_struct(chk->seen[--chk->nseen]);
+	kfree(chk->seen);
+	chk->seen = NULL;
+}
+
+/**
+ * devres_finish_open_file_check - decide the deferred debugfs hits
+ * @dev: the device, after devres_release_all()
+ * @chk: state from devres_check_open_files()
+ *
+ * A debugfs file that was live during the walk may have been removed by a
+ * devres action since; debugfs then refuses further operations on it and
+ * the hit is informational. One still live now points at freed memory.
+ */
+void devres_finish_open_file_check(struct device *dev,
+				   struct devres_open_file_check *chk)
+{
+	struct devres_pending_ref *pend, *tmp;
+	const struct file_operations *real_fops;
+
+	if (!chk->nr)
+		return;
+
+	list_for_each_entry_safe(pend, tmp, &chk->pending, list) {
+		if (debugfs_file_revoked(pend->file, &real_fops))
+			devres_report_revoked(dev, pend->region, pend->what,
+					      pend->fd, pend->file, pend->comm,
+					      pend->pnr, real_fops,
+					      "by a devres action");
+		else
+			devres_warn_ref(dev, pend->region, pend->what, pend->fd,
+					pend->file, pend->comm, pend->pnr,
+					": debugfs file still registered after its data was freed");
+		list_del(&pend->list);
+		fput(pend->file);
+		kfree(pend);
+	}
+
+	kfree(chk->regions);
+	chk->regions = NULL;
+	chk->nr = 0;
 }
 #endif /* CONFIG_DEBUG_DEVRES_REFS */
 

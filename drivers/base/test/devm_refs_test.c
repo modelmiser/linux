@@ -16,11 +16,13 @@
  * DEBUG_DEVRES_REFS warning, for the bad node. Closing the bad node after
  * unbind is a use-after-free that KASAN reports independently.
  */
+#include <linux/debugfs.h>
 #include <linux/fs.h>
 #include <linux/kref.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 
@@ -40,7 +42,28 @@ struct devm_refs_good {
 struct devm_refs_state {
 	struct devm_refs_bad *bad;
 	struct devm_refs_good *good;
+	struct dentry *dbg;
 };
+
+/*
+ * A debugfs file whose i_private points into devm memory and whose
+ * removal is a devres action registered AFTER that allocation: debugfs
+ * revokes it before the memory goes, so the check must report it at info
+ * level after release, not WARN during the walk.
+ */
+static int devm_refs_dbg_show(struct seq_file *m, void *v)
+{
+	struct devm_refs_bad *bad = m->private;
+
+	seq_printf(m, "%s\n", bad->magic == DEVM_REFS_MAGIC ? "ok" : "CORRUPT");
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(devm_refs_dbg);
+
+static void devm_refs_dbg_remove(void *dir)
+{
+	debugfs_remove_recursive(dir);
+}
 
 static ssize_t devm_refs_bad_read(struct file *file, char __user *buf,
 				  size_t len, loff_t *ppos)
@@ -149,6 +172,13 @@ static int devm_refs_probe(struct platform_device *pdev)
 	st->good->misc.name = "devm_refs_good";
 	st->good->misc.fops = &devm_refs_good_fops;
 	st->good->misc.parent = dev;
+
+	st->dbg = debugfs_create_dir("devm_refs_test", NULL);
+	debugfs_create_file("bad_magic", 0444, st->dbg, st->bad,
+			    &devm_refs_dbg_fops);
+	ret = devm_add_action_or_reset(dev, devm_refs_dbg_remove, st->dbg);
+	if (ret)
+		goto err_free_good;
 
 	ret = misc_register(&st->bad->misc);
 	if (ret)
