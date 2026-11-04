@@ -10,8 +10,10 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/percpu.h>
+#include <linux/dcache.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/magic.h>
 #include <linux/sched/signal.h>
 
 #include <asm/sections.h>
@@ -567,12 +569,28 @@ static void devres_check_file_ref(struct device *dev, struct list_head *nodes,
 				  const void *p)
 {
 	struct devres_node *node = devres_find_containing(nodes, p);
+	struct dentry *dentry = file->f_path.dentry;
 
 	if (!node)
 		return;
 
+	/*
+	 * A debugfs file that has already been removed is guarded by debugfs
+	 * itself: read/write/ioctl/poll on the held fd fail with -EIO (see
+	 * __debugfs_file_get()). The pointer is still dangling, and the real
+	 * release callback is still invoked on close, so report it, but do
+	 * not treat it as the unconditional use-after-free a live cdev is.
+	 */
+	if (file_inode(file)->i_sb->s_magic == DEBUGFS_MAGIC &&
+	    d_unlinked(dentry)) {
+		dev_info(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pd) in %s[%d] at release (removed debugfs file: ops guarded, release callback is not)\n",
+			 node->name, node->size, what, fd, dentry,
+			 task->comm, task_pid_nr(task));
+		return;
+	}
+
 	dev_WARN(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pd) in %s[%d] at release\n",
-		 node->name, node->size, what, fd, file->f_path.dentry,
+		 node->name, node->size, what, fd, dentry,
 		 task->comm, task_pid_nr(task));
 }
 
