@@ -165,10 +165,23 @@ config DEBUG_DEVRES_REFS
 	help
 	  When a device's managed resources are released (normally on
 	  driver unbind), walk the open files of every task and warn if a
-	  file's private_data or its inode's i_private still points into a
-	  managed allocation that is about to be freed. Such a pointer is a
-	  use-after-free waiting for the next file operation, typically
-	  close(). This is a slow debug check intended for test systems.
+	  file still points into a managed allocation that is about to be
+	  freed: through private_data, the inode's i_private, a character
+	  device's cdev or its kobject parent, or a holder registered by
+	  the owning subsystem (V4L2 registers video_devdata()). Such a
+	  pointer is a use-after-free waiting for the next file operation,
+	  typically close(). A debugfs file that has already been removed
+	  is reported at info level instead, since debugfs refuses further
+	  operations on it; its release callback is still named because it
+	  still runs on close.
+
+	  Limitations: only files in task fd tables are seen, so references
+	  held by sockets, epoll, io_uring or kernel-internal files are not;
+	  and the check finds pointers that are dangling at release time,
+	  not teardown races in which an operation already in flight
+	  outlives the free.
+
+	  This is a slow debug check intended for test systems.
 
 	  If you are unsure about this, say N here.
 

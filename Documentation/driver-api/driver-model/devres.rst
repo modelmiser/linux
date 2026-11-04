@@ -221,6 +221,17 @@ in lib/devres.c.
 All devres interface functions can be called without context if the
 right gfp mask is given.
 
+Managed memory is freed on driver unbind regardless of whether anything
+else still refers to it.  In particular a device node that user space
+holds open outlives the unbind, so driver state that an open file can
+reach - a struct cdev, video_device, miscdevice or debugfs private data
+embedded in it - must not live in devm_kzalloc()'d memory.  Allocate
+such state with kzalloc() and free it from the release callback of the
+object that user space holds, or from a refcount dropped on last close.
+CONFIG_DEBUG_DEVRES_REFS warns at release time when an open file still
+points into a managed allocation; see drivers/base/Kconfig for what it
+can and cannot see.
+
 
 5. Overhead
 -----------

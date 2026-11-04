@@ -612,10 +612,16 @@ static void devres_check_file_ref(struct device *dev, struct list_head *nodes,
 	 */
 	if (file_inode(file)->i_sb->s_magic == DEBUGFS_MAGIC &&
 	    d_unlinked(dentry)) {
-		dev_info(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pd) in %s[%d] at release (removed debugfs file: ops guarded; close will still call release %ps)\n",
+		const void *release = debugfs_file_release_fn(file);
+		char relname[64];
+
+		if (release)
+			snprintf(relname, sizeof(relname), "%ps", release);
+		else
+			strscpy(relname, "none", sizeof(relname));
+		dev_info(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pd) in %s[%d] at release (removed debugfs file: ops guarded; close will still call release %s)\n",
 			 node->name, node->size, what, fd, dentry,
-			 task->comm, task_pid_nr(task),
-			 debugfs_file_release_fn(file));
+			 task->comm, task_pid_nr(task), relname);
 		return;
 	}
 
