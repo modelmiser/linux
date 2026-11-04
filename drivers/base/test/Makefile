@@ -11,3 +11,4 @@ obj-$(CONFIG_DRIVER_SWNODE_KUNIT_TEST) += swnode-devlink-test.o
 
 obj-$(CONFIG_DEVM_REFS_TEST)	+= devm_refs_test.o
 obj-$(CONFIG_DEVM_REFS_LA_GLUE)	+= devm_refs_la_glue.o
+obj-$(CONFIG_DEVM_REFS_V4L2_TEST)	+= devm_refs_v4l2_test.o
