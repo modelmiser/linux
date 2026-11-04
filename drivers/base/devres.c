@@ -546,14 +546,14 @@ static int remove_nodes(struct device *dev,
 
 #ifdef CONFIG_DEBUG_DEVRES_REFS
 /*
- * CONFIG_DEBUG_DEVRES_REFS: before a driver's managed memory is freed on
- * unbind, find open files that still point into it.
+ * CONFIG_DEBUG_DEVRES_REFS: before a driver's managed memory is freed, find
+ * open files that still point into it.
  *
- * Runs from device_unbind_cleanup() only: process context, device_lock
- * held, after the driver's remove callback and before devres_release_all().
- * It is deliberately not run from devres_release_all() itself, which is
- * also reached from device_release() and so from any context in which a
- * final put_device() is legal.
+ * Runs from device_unbind_cleanup() only, i.e. on driver unbind and after a
+ * failed probe: process context, device_lock held, before
+ * devres_release_all(). It is deliberately not run from
+ * devres_release_all() itself, which is also reached from device_release()
+ * and so from any context in which a final put_device() is legal.
  */
 static LIST_HEAD(devres_open_file_hooks);
 static DEFINE_MUTEX(devres_open_file_hooks_lock);
@@ -625,6 +625,12 @@ static unsigned int devres_snapshot_regions(struct device *dev,
 	if (!regions)
 		return 0;
 
+	/*
+	 * The list may have changed between the two passes (a driver still
+	 * calling devm_* after remove() returned, which is its own bug).
+	 * Growth is bounded by @n; shrinkage leaves zeroed entries, which
+	 * can never contain a pointer, and @i below the count.
+	 */
 	spin_lock_irqsave(&dev->devres_lock, flags);
 	list_for_each_entry(node, &dev->devres_head, entry) {
 		struct devres *dr;
@@ -632,7 +638,7 @@ static unsigned int devres_snapshot_regions(struct device *dev,
 		if (node->release != dr_node_release || !node->size)
 			continue;
 		if (i == n)
-			break;	/* list grew under us; check what we have */
+			break;
 		dr = container_of(node, struct devres, node);
 		regions[i].start = dr->data;
 		regions[i].size = node->size;
@@ -641,6 +647,10 @@ static unsigned int devres_snapshot_regions(struct device *dev,
 	}
 	spin_unlock_irqrestore(&dev->devres_lock, flags);
 
+	if (!i) {
+		kfree(regions);
+		return 0;
+	}
 	*out = regions;
 	return i;
 }
@@ -664,23 +674,22 @@ static void devres_report_open_file(struct device *dev,
 				    struct task_struct *task, unsigned int fd,
 				    struct file *file, const char *what)
 {
+	const struct file_operations *real_fops;
 	char comm[TASK_COMM_LEN];
-	const void *release;
 
 	get_task_comm(comm, task);
 
 	/*
-	 * A debugfs file that debugfs itself has revoked (created through
-	 * its full proxy, since removed) refuses read/write/ioctl/poll
-	 * with -EIO, and full_proxy_release() documents that releasers
-	 * must not rely on i_private. Report it, name the release callback
-	 * that will still run on close, but do not warn.
+	 * A removed debugfs file that debugfs itself cuts off from the
+	 * driver (see debugfs_file_revoked()) refuses read/write/ioctl/poll
+	 * with -EIO. Report it and name the release callback that close()
+	 * will still run, but do not warn.
 	 */
-	if (debugfs_file_revoked(file, &release)) {
-		if (release)
+	if (debugfs_file_revoked(file, &real_fops)) {
+		if (real_fops && real_fops->release)
 			dev_info(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pD3) in %s[%d] at unbind: removed debugfs file, ops refused by debugfs, close will still call %ps\n",
 				 region->name, region->size, what, fd, file,
-				 comm, task_pid_nr(task), release);
+				 comm, task_pid_nr(task), real_fops->release);
 		else
 			dev_info(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pD3) in %s[%d] at unbind: removed debugfs file, ops refused by debugfs, no release callback\n",
 				 region->name, region->size, what, fd, file,
@@ -714,13 +723,13 @@ static void devres_check_one_file(struct device *dev,
 	if (file->f_mode & FMODE_PATH)
 		return;
 
-	pd = file->private_data;
+	pd = READ_ONCE(file->private_data);
 	region = devres_region_containing(regions, nr, pd);
 	if (region)
 		devres_report_open_file(dev, region, task, fd, file,
 					"private_data");
 
-	ip = file_inode(file)->i_private;
+	ip = READ_ONCE(file_inode(file)->i_private);
 	if (ip != pd) {
 		region = devres_region_containing(regions, nr, ip);
 		if (region)
@@ -739,15 +748,43 @@ static void devres_check_one_file(struct device *dev,
 	}
 }
 
+/*
+ * Is @task's fd table already walked through another thread of its group?
+ * Called under rcu_read_lock() with @task still hashed, so its group
+ * leader and siblings cannot have been freed. Threads are visited in pid
+ * order; the lowest-pid live thread sharing a table is the one walked.
+ */
+static bool devres_fd_table_covered(struct task_struct *task)
+{
+	struct files_struct *files = READ_ONCE(task->files);
+	pid_t nr = task_pid_nr(task);
+	struct task_struct *t;
+
+	if (!files)
+		return true;	/* exiting: nothing to walk */
+
+	for_each_thread(task, t) {
+		if (t != task && READ_ONCE(t->files) == files &&
+		    task_pid_nr(t) < nr)
+			return true;
+	}
+	return false;
+}
+
 /**
  * devres_check_open_files - warn about open files into memory about to be freed
  * @dev: device being unbound; its managed resources are still allocated
  *
- * Walk every task's open files and report any that still point into one of
- * @dev's managed allocations, which devres_release_all() is about to free.
- * Must be called in process context with no spinlocks held; the walk can
- * sleep, reschedules between tasks, and holds only a task reference and a
- * file reference at a time.
+ * Walk every thread's open files and report any that still point into one
+ * of @dev's managed allocations, which devres_release_all() is about to
+ * free. Must be called in process context with no spinlocks held; the walk
+ * can sleep, reschedules between tasks, and holds only one task reference
+ * and one file reference at a time.
+ *
+ * Holding that file reference means that if the owner closes the file
+ * meanwhile, the final fput() (and so the driver's release callback) runs
+ * from this task's task work instead of the owner's close(). The file was
+ * reported either way; only where its release runs moves.
  */
 void devres_check_open_files(struct device *dev)
 {
@@ -774,22 +811,14 @@ void devres_check_open_files(struct device *dev)
 			break;
 		}
 		tid = pid_nr(pid) + 1;
-		task = get_pid_task(pid, PIDTYPE_PID);
+		task = pid_task(pid, PIDTYPE_PID);
+		if (task && !devres_fd_table_covered(task))
+			get_task_struct(task);
+		else
+			task = NULL;
 		rcu_read_unlock();
 		if (!task)
 			continue;
-
-		/*
-		 * Iterating by pid visits every thread, so a thread with its
-		 * own fd table (or whose group leader has exited) is seen.
-		 * Threads sharing the leader's table are covered by the leader.
-		 */
-		if (task != task->group_leader &&
-		    READ_ONCE(task->files) ==
-		    READ_ONCE(task->group_leader->files)) {
-			put_task_struct(task);
-			continue;
-		}
 
 		while ((file = fget_task_next(task, &fd))) {
 			devres_check_one_file(dev, regions, nr, task, fd, file);
@@ -1281,9 +1310,16 @@ void *devm_krealloc(struct device *dev, void *ptr, size_t new_size, gfp_t gfp)
 	 * allocated previously - just return the same pointer.
 	 */
 	if (total_new_size <= total_old_size) {
-		/* Keep the recorded size current for debugging aids. */
+		/*
+		 * Keep the recorded size from under-stating what the caller
+		 * may now use (debugging aids read it). Never shrink it: the
+		 * slack is freed with the chunk, so over-stating is harmless.
+		 */
+		old_dr = container_of(ptr, struct devres, data);
+		spin_lock_irqsave(&dev->devres_lock, flags);
 		if (new_size > old_dr->node.size)
 			old_dr->node.size = new_size;
+		spin_unlock_irqrestore(&dev->devres_lock, flags);
 		return ptr;
 	}
 

@@ -286,6 +286,9 @@ static inline int __devm_add_action_or_reset(struct device *dev, void (*action)(
 
 bool devm_is_action_added(struct device *dev, void (*action)(void *), void *data);
 
+struct file;
+struct file_operations;
+
 /**
  * struct devres_open_file_hook - how an open file of one file_operations
  *                                reaches the driver object it keeps alive
@@ -301,13 +304,15 @@ bool devm_is_action_added(struct device *dev, void (*action)(void *), void *data
  * with a reference on @file held and the hook mutex held; it must not
  * sleep on anything that could wait for an unbind, must not register or
  * unregister hooks, and must not dereference the object it returns, which
- * may already be freed. The struct is defined unconditionally so that a
- * subsystem can keep its instance outside any #ifdef; the registration
- * calls are empty stubs when the option is off. Unregister before the
- * owning module's memory goes away, including on a failed module init.
+ * may already be freed. @file is not const only because subsystem accessors
+ * such as video_devdata() take a non-const file; @holder must not modify it.
+ * The struct is defined unconditionally so that a subsystem can keep its
+ * instance outside any #ifdef; the registration calls are empty stubs when
+ * the option is off. The instance must be static or zero-initialised, so
+ * that unregistering a hook whose registration failed is a no-op.
+ * Unregister before the owning module's memory goes away, including on a
+ * failed module init.
  */
-struct file;
-struct file_operations;
 struct devres_open_file_hook {
 	struct list_head list;
 	const struct file_operations *fops;

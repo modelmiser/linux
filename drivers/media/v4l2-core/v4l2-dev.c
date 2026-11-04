@@ -1273,8 +1273,7 @@ static int __init videodev_init(void)
 	}
 
 	/* Last, so no failure above can leave the hook registered. */
-	if (devres_register_open_file_hook(&v4l2_devres_open_file_hook))
-		pr_warn("videodev: devres open-file hook not registered\n");
+	WARN_ON(devres_register_open_file_hook(&v4l2_devres_open_file_hook));
 
 	return 0;
 }

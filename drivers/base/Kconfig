@@ -163,28 +163,33 @@ config DEBUG_DEVRES_REFS
 	bool "Warn about managed memory still held by open files at unbind"
 	depends on DEBUG_KERNEL
 	help
-	  Before a driver's managed (devm) allocations are freed on unbind,
-	  walk the open files of every process and thread and warn if one
-	  still points into an allocation about to be freed: through
-	  file->private_data, the inode's i_private, or a holder registered
-	  by the owning subsystem (V4L2 registers video_devdata()). Such a
-	  pointer is a use-after-free waiting for the next file operation,
-	  typically close(). One backtrace is printed per allocation; further
-	  holders of the same allocation get one line each. A removed debugfs
-	  file on which debugfs itself refuses further operations (one created
-	  through its full proxy, or through one of its own guarded helpers
-	  such as debugfs_create_ulong() or debugfs_create_blob()) is reported
-	  at info level instead; its release callback is still named because
-	  it still runs on close. A file created with a debugfs _unsafe
-	  variant and the driver's own file_operations gets no such guard
-	  and is warned about like any other file.
+	  Before a driver's managed (devm) allocations are freed, on unbind
+	  or after a failed probe, walk the open files of every thread and
+	  WARN if one still points into an allocation about to be freed:
+	  through file->private_data, the inode's i_private, or a holder
+	  registered by the owning subsystem (V4L2 registers
+	  video_devdata()). Such a pointer is a use-after-free waiting for
+	  the next file operation, typically close(). One WARN backtrace
+	  (which taints the kernel) is printed per allocation per unbind;
+	  further holders of the same allocation get one line each. A
+	  removed debugfs file on which debugfs itself refuses further
+	  operations (one created through its full proxy, or through one of
+	  its own guarded helpers such as debugfs_create_ulong() or
+	  debugfs_create_blob()) is reported at info level instead; its
+	  release callback is still named because it still runs on close. A
+	  file created with a debugfs _unsafe variant and the driver's own
+	  file_operations gets no such guard and is warned about like any
+	  other file.
 
 	  Limitations: only files in task fd tables are seen, so references
 	  held by sockets, epoll, io_uring or kernel-internal files are not;
-	  the check runs on driver unbind only, not on other devres release
-	  paths; and it finds pointers that are dangling at that moment, not
-	  teardown races in which an operation already in flight outlives
-	  the free.
+	  the check runs from the unbind and probe-failure paths only, not
+	  on other devres release paths; it finds pointers that are dangling
+	  at that moment, not teardown races in which an operation already
+	  in flight outlives the free; and a driver that keeps freeing devm
+	  memory after remove() returned can make it misreport. The walk
+	  also runs on every deferred probe, which costs boot time on
+	  systems with many tasks.
 
 	  This is a slow debug check intended for test systems.
 

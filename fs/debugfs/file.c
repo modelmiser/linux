@@ -432,7 +432,6 @@ static int full_proxy_release(struct inode *inode, struct file *file)
 	return r;
 }
 
-
 static int full_proxy_open_regular(struct inode *inode, struct file *filp)
 {
 	struct dentry *dentry = F_DENTRY(filp);
@@ -1376,39 +1375,53 @@ void debugfs_create_devm_seqfile(struct device *dev, const char *name,
 }
 EXPORT_SYMBOL_GPL(debugfs_create_devm_seqfile);
 
-/* debugfs's own file_operations for _unsafe files that take the removal guard */
-static bool debugfs_unsafe_fops_guarded(const struct file_operations *fops)
+/*
+ * debugfs's own file_operations for _unsafe files on which nothing after
+ * open can reach the driver's data: either every operation takes the
+ * removal guard (debugfs_file_get()), or the data is copied at open.
+ */
+static bool debugfs_unsafe_fops_safe_after_removal(const struct file_operations *fops)
 {
-	if (fops == &fops_blob || fops == &fops_bool || fops == &fops_str)
+	if (fops == &fops_blob || fops == &fops_str ||
+	    fops == &fops_bool || fops == &fops_bool_ro || fops == &fops_bool_wo)
+		return true;
+	if (fops == &u32_array_fops)	/* copies the array at open */
 		return true;
 	/* DEFINE_DEBUGFS_ATTRIBUTE(): read/write go through debugfs_file_get() */
 	return fops->read == debugfs_attr_read &&
-	       (!fops->write || fops->write == debugfs_attr_write ||
-		fops->write == debugfs_attr_write_signed);
+	       (fops->write == debugfs_attr_write ||
+		fops->write == debugfs_attr_write_signed) &&
+	       !fops->unlocked_ioctl && !fops->compat_ioctl && !fops->poll &&
+	       !fops->mmap;
 }
 
 /**
  * debugfs_file_revoked - has debugfs cut @file off from its driver?
  * @file: an open file, held by the caller
- * @release: set to the release callback close() will still run, or NULL
+ * @real_fops: set to the file_operations whose release callback close()
+ *             will still run, or NULL if there are none
  *
- * Returns true for a removed debugfs file whose read/write/ioctl/poll are
- * refused with -EIO by debugfs itself: one created through the full proxy
- * (debugfs_create_file() and the helpers built on it), or one of the
- * _unsafe files whose file_operations belong to debugfs and take the
- * removal guard (the DEFINE_DEBUGFS_ATTRIBUTE() family, blobs, bools,
- * strings). full_proxy_release() still runs the real release callback on
- * such a file, and documents that releasers must not rely on i_private, so
- * @release names that callback for the caller. A file created with an
- * _unsafe variant and the driver's own file_operations gets no guard from
- * debugfs, and this returns false. For debugging aids that find a stale
- * pointer behind an open debugfs file; not for use elsewhere.
+ * For debugging aids that find a stale pointer behind an open debugfs file
+ * after the file was removed; not for use elsewhere.
+ *
+ * Return: true if @file is a removed debugfs file on which no further
+ * operation can reach the driver's data: one created through the full
+ * proxy (debugfs_create_file() and the helpers built on it), on which
+ * read/write/ioctl/poll return -EIO (see __debugfs_file_get()); or one of
+ * the _unsafe files whose read/write callbacks are debugfs's own guarded
+ * ones (the DEFINE_DEBUGFS_ATTRIBUTE() family, blobs, bools, strings) or
+ * which copy their data at open (u32 arrays). close() still runs the real
+ * release callback on such a file, through full_proxy_release() for
+ * proxied files and directly otherwise, so @real_fops names it. A file
+ * created with an _unsafe variant and the driver's own file_operations
+ * gets no guard from debugfs, and this returns false.
  */
-bool debugfs_file_revoked(const struct file *file, const void **release)
+bool debugfs_file_revoked(const struct file *file,
+			  const struct file_operations **real_fops)
 {
 	const struct debugfs_fsdata *fsd;
 
-	*release = NULL;
+	*real_fops = NULL;
 
 	if (!d_unlinked(file->f_path.dentry))
 		return false;
@@ -1416,17 +1429,16 @@ bool debugfs_file_revoked(const struct file *file, const void **release)
 	if (file->f_op == &debugfs_full_proxy_file_operations) {
 		/* Populated by full_proxy_open_regular(), pinned by the file. */
 		fsd = READ_ONCE(file->f_path.dentry->d_fsdata);
-		if (fsd && fsd->real_fops)
-			*release = fsd->real_fops->release;
+		if (fsd)
+			*real_fops = fsd->real_fops;
 		return true;
 	}
 	if (file->f_op == &debugfs_full_short_proxy_file_operations)
-		return true;
+		return true;	/* short fops: no release callback at all */
 	if (file_inode(file)->i_sb->s_magic == DEBUGFS_MAGIC &&
-	    debugfs_unsafe_fops_guarded(file->f_op)) {
-		*release = file->f_op->release;
+	    debugfs_unsafe_fops_safe_after_removal(file->f_op)) {
+		*real_fops = file->f_op;
 		return true;
 	}
 	return false;
 }
-EXPORT_SYMBOL_GPL(debugfs_file_revoked);
