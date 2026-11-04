@@ -3,7 +3,7 @@
  * Test vehicle for CONFIG_DEBUG_DEVRES_REFS.
  *
  * Registers one platform device bound to a driver that exposes two misc
- * devices:
+ * devices and one debugfs file (see devm_refs_dbg_show() below):
  *
  *   /dev/devm_refs_bad  - driver state allocated with devm_kzalloc(), so
  *                         it is freed on unbind even while the node is open.

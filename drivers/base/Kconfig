@@ -181,8 +181,8 @@ config DEBUG_DEVRES_REFS
 	  managed resources were released, since drivers often remove their
 	  debugfs files through a devres action: removed by then is info,
 	  still live is a WARN. A file created with a debugfs _unsafe
-	  variant and the driver's own file_operations gets no such guard
-	  and is warned about like any other file.
+	  variant and the driver's own file_operations gets no such guard;
+	  it is deferred like a live debugfs file and then warned about.
 
 	  Limitations: only files in task fd tables are seen, so references
 	  held by sockets, epoll, io_uring or kernel-internal files are not;

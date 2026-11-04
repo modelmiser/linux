@@ -29,9 +29,12 @@ config DEVM_REFS_TEST
 	depends on DEBUG_DEVRES_REFS
 	help
 	  Registers a platform device whose driver exposes /dev/devm_refs_bad
-	  (state in devm memory, freed on unbind while open) and
-	  /dev/devm_refs_good (refcounted state). Unbinding with both nodes
-	  open must warn exactly once. See drivers/base/test/devm_refs_test.c.
+	  (state in devm memory, freed on unbind while open),
+	  /dev/devm_refs_good (refcounted state) and a debugfs file
+	  bad_magic whose data is that devm memory and whose removal is a
+	  devres action. Unbinding with all three open must warn exactly
+	  once and report the debugfs file at info level after release.
+	  See drivers/base/test/devm_refs_test.c.
 
 	  If unsure say N.
 

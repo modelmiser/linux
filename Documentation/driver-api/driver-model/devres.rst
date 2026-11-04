@@ -228,9 +228,11 @@ reach - a struct cdev, video_device or miscdevice embedded in it - must
 not live in devm_kzalloc()'d memory.  Allocate such state with kzalloc()
 and free it from the release callback of the object that user space
 holds, or from a refcount dropped on last close.  debugfs private data
-may be managed memory only if the debugfs removal is itself a devres
-action registered after that allocation, so that debugfs revokes the
-file before the memory is freed.
+may be managed memory only if the file is created through
+debugfs_create_file() or one of debugfs's own helpers, so that debugfs
+refuses operations on it once removed, and the file is removed before
+the allocation is freed: in the remove callback, or by a devres action
+registered after that allocation.
 CONFIG_DEBUG_DEVRES_REFS reports, at driver unbind or after a failed
 probe, open files that still point into a managed allocation about to
 be freed; its Kconfig help text lists what it can and cannot see.

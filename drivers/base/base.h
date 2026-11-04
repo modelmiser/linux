@@ -243,11 +243,16 @@ void devres_for_each_res(struct device *dev, dr_release_t release,
 			 void *data);
 int devres_release_all(struct device *dev);
 /* CONFIG_DEBUG_DEVRES_REFS state carried across devres_release_all() */
+struct devres_seen_table {
+	struct task_struct *task;
+	struct files_struct *files;
+};
+
 struct devres_open_file_check {
 #ifdef CONFIG_DEBUG_DEVRES_REFS
 	struct devres_region *regions;
 	unsigned int nr;
-	struct files_struct **seen;
+	struct devres_seen_table *seen;
 	unsigned int nseen, maxseen;
 	struct list_head pending;
 #endif

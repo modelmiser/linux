@@ -10,8 +10,8 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/percpu.h>
+#include <linux/dcache.h>
 #include <linux/debugfs.h>
-#include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/magic.h>
@@ -560,10 +560,12 @@ static int remove_nodes(struct device *dev,
  * Phase 1 (devres_check_open_files) snapshots the regions and walks every
  * fd table. A hit on an ordinary file is a WARN at once. A hit on a debugfs
  * file is decided by whether debugfs has revoked the file: if already
- * removed, info now; if still live, the verdict waits, because many drivers
- * remove their debugfs files through a devres action that runs inside
- * devres_release_all(). Phase 2 (devres_finish_open_file_check) revisits
- * those after release: removed by then is info, still live is a WARN.
+ * removed and guarded by debugfs, info now; otherwise the verdict waits,
+ * because many drivers remove their debugfs files through a devres action
+ * that runs inside devres_release_all(). Phase 2
+ * (devres_finish_open_file_check) revisits those after release: removed
+ * and guarded by then is info; removed but with unguarded file_operations,
+ * or still live, is a WARN.
  */
 static LIST_HEAD(devres_open_file_hooks);
 /* Lock order: device_lock(dev) -> devres_open_file_hooks_lock -> task_lock(). */
@@ -817,10 +819,12 @@ static void devres_check_one_file(struct device *dev,
 }
 
 /*
- * Each fd table is walked once. Tables already walked are kept pinned in
- * chk->seen (so their addresses cannot be reused) until the walk ends;
- * the set grows as needed and, if growth fails, later sharers of a table
- * are walked again, which costs duplicate lines only.
+ * Each fd table is walked once. A table already walked is remembered as
+ * (owning task, table) with a reference on the task only: a table counts as
+ * seen while that task still points at it, which proves the table was not
+ * freed and its address reused. Nothing takes a reference on the table
+ * itself, so the walk never ends up closing another task's files. If the
+ * set cannot grow, later sharers are walked again, costing duplicate lines.
  */
 static bool devres_fd_table_seen(struct devres_open_file_check *chk,
 				 struct files_struct *files)
@@ -828,7 +832,8 @@ static bool devres_fd_table_seen(struct devres_open_file_check *chk,
 	unsigned int i;
 
 	for (i = 0; i < chk->nseen; i++)
-		if (chk->seen[i] == files)
+		if (chk->seen[i].files == files &&
+		    READ_ONCE(chk->seen[i].task->files) == files)
 			return true;
 	return false;
 }
@@ -836,7 +841,8 @@ static bool devres_fd_table_seen(struct devres_open_file_check *chk,
 static void devres_fd_table_mark(struct devres_open_file_check *chk,
 				 struct task_struct *task)
 {
-	struct files_struct *files, **seen;
+	struct devres_seen_table *seen;
+	struct files_struct *files;
 
 	if (chk->nseen == chk->maxseen) {
 		unsigned int max = chk->maxseen ? chk->maxseen * 2 : 64;
@@ -849,13 +855,12 @@ static void devres_fd_table_mark(struct devres_open_file_check *chk,
 		chk->maxseen = max;
 	}
 
-	task_lock(task);
-	files = task->files;
+	files = READ_ONCE(task->files);
 	if (files && !devres_fd_table_seen(chk, files)) {
-		atomic_inc(&files->count);
-		chk->seen[chk->nseen++] = files;
+		chk->seen[chk->nseen].task = get_task_struct(task);
+		chk->seen[chk->nseen].files = files;
+		chk->nseen++;
 	}
-	task_unlock(task);
 }
 
 /**
@@ -867,8 +872,9 @@ static void devres_fd_table_mark(struct devres_open_file_check *chk,
  * of @dev's managed allocations, which devres_release_all() is about to
  * free. Must be called in process context with no spinlocks held; the walk
  * can sleep, reschedules between tasks, and holds only one task reference
- * and one file reference at a time (plus pinned fd tables and deferred
- * debugfs files, released in devres_finish_open_file_check()).
+ * and one file reference at a time, plus task references for the fd tables
+ * already walked (dropped at the end of the walk) and references on
+ * deferred debugfs files (dropped in devres_finish_open_file_check()).
  *
  * Holding a file reference means that if the owner closes the file
  * meanwhile, the final fput() (and so the driver's release callback) runs
@@ -927,7 +933,7 @@ void devres_check_open_files(struct device *dev,
 	mutex_unlock(&devres_open_file_hooks_lock);
 
 	while (chk->nseen)
-		put_files_struct(chk->seen[--chk->nseen]);
+		put_task_struct(chk->seen[--chk->nseen].task);
 	kfree(chk->seen);
 	chk->seen = NULL;
 }
@@ -938,8 +944,9 @@ void devres_check_open_files(struct device *dev,
  * @chk: state from devres_check_open_files()
  *
  * A debugfs file that was live during the walk may have been removed by a
- * devres action since; debugfs then refuses further operations on it and
- * the hit is informational. One still live now points at freed memory.
+ * devres action since; if debugfs guards it, the hit is informational. One
+ * removed but with unguarded file_operations, or one still live, points at
+ * freed memory.
  */
 void devres_finish_open_file_check(struct device *dev,
 				   struct devres_open_file_check *chk)
@@ -956,6 +963,10 @@ void devres_finish_open_file_check(struct device *dev,
 					      pend->fd, pend->file, pend->comm,
 					      pend->pnr, real_fops,
 					      "by a devres action");
+		else if (d_unlinked(pend->file->f_path.dentry))
+			devres_warn_ref(dev, pend->region, pend->what, pend->fd,
+					pend->file, pend->comm, pend->pnr,
+					": debugfs file removed, but its file_operations are not guarded by debugfs");
 		else
 			devres_warn_ref(dev, pend->region, pend->what, pend->fd,
 					pend->file, pend->comm, pend->pnr,
