@@ -10,3 +10,4 @@ CFLAGS_property-entry-test.o += $(DISABLE_STRUCTLEAK_PLUGIN)
 obj-$(CONFIG_DRIVER_SWNODE_KUNIT_TEST) += swnode-devlink-test.o
 
 obj-$(CONFIG_DEVM_REFS_TEST)	+= devm_refs_test.o
+obj-$(CONFIG_DEVM_REFS_LA_GLUE)	+= devm_refs_la_glue.o

@@ -34,3 +34,13 @@ config DEVM_REFS_TEST
 	  open must warn exactly once. See drivers/base/test/devm_refs_test.c.
 
 	  If unsure say N.
+
+config DEVM_REFS_LA_GLUE
+	bool "Instantiate gpio-sloppy-logic-analyzer on a fake GPIO chip (DEBUG_DEVRES_REFS test)"
+	depends on DEBUG_DEVRES_REFS && GPIO_SLOPPY_LOGIC_ANALYZER=y
+	help
+	  Registers a platform device for the sloppy logic analyzer bound to
+	  lines 0 and 1 of a built-in fake non-sleeping GPIO chip, so the
+	  analyzer can be unbound with its debugfs files open in a VM.
+
+	  If unsure say N.
