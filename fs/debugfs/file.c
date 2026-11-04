@@ -11,6 +11,7 @@
 
 #include <linux/module.h>
 #include <linux/fs.h>
+#include <linux/magic.h>
 #include <linux/seq_file.h>
 #include <linux/pagemap.h>
 #include <linux/debugfs.h>
@@ -1373,3 +1374,114 @@ void debugfs_create_devm_seqfile(struct device *dev, const char *name,
 			    &debugfs_devm_entry_ops);
 }
 EXPORT_SYMBOL_GPL(debugfs_create_devm_seqfile);
+
+#ifdef CONFIG_DEBUG_DEVRES_REFS
+/*
+ * debugfs's own file_operations for _unsafe files on which nothing after
+ * open can reach the driver's data: either every operation takes the
+ * removal guard (debugfs_file_get()), or the data is copied at open.
+ */
+static bool debugfs_unsafe_fops_safe_after_removal(const struct file_operations *fops)
+{
+	if (fops == &fops_blob || fops == &fops_str ||
+	    fops == &fops_bool || fops == &fops_bool_ro || fops == &fops_bool_wo)
+		return true;
+	if (fops == &u32_array_fops)	/* copies the array at open */
+		return true;
+	/*
+	 * DEFINE_DEBUGFS_ATTRIBUTE(): read/write go through
+	 * debugfs_file_get(), release only frees the simple_attr, and the
+	 * macro sets no other operation at all.
+	 */
+	return fops->read == debugfs_attr_read &&
+	       (fops->write == debugfs_attr_write ||
+		fops->write == debugfs_attr_write_signed) &&
+	       fops->release == simple_attr_release &&
+	       !fops->llseek && !fops->read_iter && !fops->write_iter &&
+	       !fops->iopoll && !fops->iterate_shared && !fops->poll &&
+	       !fops->unlocked_ioctl && !fops->compat_ioctl && !fops->mmap &&
+	       !fops->mmap_prepare && !fops->flush && !fops->fsync &&
+	       !fops->fasync && !fops->lock && !fops->get_unmapped_area &&
+	       !fops->check_flags && !fops->flock && !fops->splice_write &&
+	       !fops->splice_read && !fops->splice_eof && !fops->setlease &&
+	       !fops->fallocate && !fops->show_fdinfo &&
+	       !fops->copy_file_range && !fops->remap_file_range &&
+	       !fops->fadvise && !fops->uring_cmd && !fops->uring_cmd_iopoll &&
+#ifndef CONFIG_MMU
+	       !fops->mmap_capabilities &&
+#endif
+	       !fops->init_dma_buf_io_ctx && !fops->fop_flags;
+	/* Keep in step with struct file_operations in include/linux/fs.h. */
+}
+
+/**
+ * debugfs_file_release_safe - will close() of a removed file leave the
+ *                             driver's data alone?
+ * @fops: the file_operations debugfs_file_revoked() handed back, or NULL
+ *
+ * Return: true if @fops has no release callback, or one of the generic
+ * ones that only free what open() allocated (seq_file, simple_attr, u32
+ * array). A driver's own release may dereference i_private or
+ * private_data; full_proxy_release() documents that it must not, but
+ * nothing enforces it.
+ */
+bool debugfs_file_release_safe(const struct file_operations *fops)
+{
+	if (!fops || !fops->release)
+		return true;
+	return fops->release == single_release ||
+	       fops->release == seq_release ||
+	       fops->release == simple_attr_release ||
+	       fops->release == u32_array_release;
+}
+
+/**
+ * debugfs_file_revoked - has debugfs cut @file off from its driver?
+ * @file: an open file, held by the caller
+ * @real_fops: set to the file_operations close() will still consult, or
+ *             NULL for a short-fops proxy; callers must still test
+ *             ->release, which may be NULL
+ *
+ * For debugging aids that find a stale pointer behind an open debugfs file
+ * after the file was removed; not for use elsewhere.
+ *
+ * Return: true if @file is a removed debugfs file on which no further
+ * operation can reach the driver's data: one created through the full
+ * proxy (debugfs_create_file() and the helpers built on it), on which
+ * read/write/llseek/ioctl fail with -EIO and poll reports EPOLLHUP (see
+ * __debugfs_file_get()); or one of
+ * the _unsafe files whose read/write callbacks are debugfs's own guarded
+ * ones (the DEFINE_DEBUGFS_ATTRIBUTE() family, blobs, bools, strings) or
+ * which copy their data at open (u32 arrays). close() still runs the real
+ * release callback on such a file, through full_proxy_release() for
+ * proxied files and directly otherwise, so @real_fops names it. A file
+ * created with an _unsafe variant and the driver's own file_operations
+ * gets no guard from debugfs, and this returns false.
+ */
+bool debugfs_file_revoked(const struct file *file,
+			  const struct file_operations **real_fops)
+{
+	const struct debugfs_fsdata *fsd;
+
+	*real_fops = NULL;
+
+	if (!d_unlinked(file->f_path.dentry))
+		return false;
+
+	if (file->f_op == &debugfs_full_proxy_file_operations) {
+		/* Populated by full_proxy_open_regular(), pinned by the file. */
+		fsd = READ_ONCE(file->f_path.dentry->d_fsdata);
+		if (fsd)
+			*real_fops = fsd->real_fops;
+		return true;
+	}
+	if (file->f_op == &debugfs_full_short_proxy_file_operations)
+		return true;	/* short fops: no release callback at all */
+	if (file_inode(file)->i_sb->s_magic == DEBUGFS_MAGIC &&
+	    debugfs_unsafe_fops_safe_after_removal(file->f_op)) {
+		*real_fops = file->f_op;
+		return true;
+	}
+	return false;
+}
+#endif /* CONFIG_DEBUG_DEVRES_REFS */

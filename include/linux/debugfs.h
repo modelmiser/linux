@@ -166,6 +166,23 @@ void *debugfs_get_aux(const struct file *file);
 
 int debugfs_file_get(struct dentry *dentry);
 void debugfs_file_put(struct dentry *dentry);
+#ifdef CONFIG_DEBUG_DEVRES_REFS
+bool debugfs_file_revoked(const struct file *file,
+			  const struct file_operations **real_fops);
+bool debugfs_file_release_safe(const struct file_operations *fops);
+#else
+static inline bool debugfs_file_revoked(const struct file *file,
+					const struct file_operations **real_fops)
+{
+	*real_fops = NULL;
+	return false;
+}
+
+static inline bool debugfs_file_release_safe(const struct file_operations *fops)
+{
+	return true;
+}
+#endif
 
 ssize_t debugfs_attr_read(struct file *file, char __user *buf,
 			size_t len, loff_t *ppos);
@@ -335,6 +352,18 @@ static inline int debugfs_file_get(struct dentry *dentry)
 
 static inline void debugfs_file_put(struct dentry *dentry)
 { }
+
+static inline bool debugfs_file_revoked(const struct file *file,
+					const struct file_operations **real_fops)
+{
+	*real_fops = NULL;
+	return false;
+}
+
+static inline bool debugfs_file_release_safe(const struct file_operations *fops)
+{
+	return true;
+}
 
 static inline ssize_t debugfs_attr_read(struct file *file, char __user *buf,
 					size_t len, loff_t *ppos)
