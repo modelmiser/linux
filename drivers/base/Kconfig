@@ -189,10 +189,12 @@ config DEBUG_DEVRES_REFS
 	  the check runs from the unbind and probe-failure paths only, not
 	  on other devres release paths; it finds pointers that are dangling
 	  at that moment, not teardown races in which an operation already
-	  in flight outlives the free; and a driver that keeps freeing devm
-	  memory after remove() returned can make it misreport. The walk
-	  also runs on every deferred probe that has already made managed
-	  allocations, which costs boot time on systems with many tasks.
+	  in flight outlives the free, nor whether a debugfs removal action
+	  ran before or after the free; and a driver that keeps freeing devm
+	  memory after remove() returned can make it misreport. The walk is
+	  linear in threads times distinct fd tables and also runs on every
+	  deferred probe that has already made managed allocations, which
+	  costs boot time on systems with many tasks.
 
 	  This is a slow debug check intended for test systems.
 

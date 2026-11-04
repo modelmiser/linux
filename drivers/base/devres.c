@@ -625,6 +625,9 @@ struct devres_region {
 	bool warned;
 };
 
+/* Beyond this many distinct fd tables, later sharers are walked again. */
+#define DEVRES_SEEN_TABLES_MAX	1048576U
+
 /* A hit on a live debugfs file, decided after devres_release_all(). */
 struct devres_pending_ref {
 	struct list_head list;
@@ -774,7 +777,10 @@ static void devres_report_open_file(struct device *dev,
 			list_add_tail(&pend->list, &chk->pending);
 			return;
 		}
-		/* No memory to defer: report now, as a plain warning. */
+		/* No memory to defer: undecided, so a line without a backtrace. */
+		dev_warn(dev, DEVRES_REF_FMT " at unbind: live debugfs file, verdict not deferred (no memory)\n",
+			 region->name, region->size, what, fd, file, comm, pnr);
+		return;
 	}
 
 	devres_warn_ref(dev, region, what, fd, file, comm, pnr, "");
@@ -821,10 +827,13 @@ static void devres_check_one_file(struct device *dev,
 /*
  * Each fd table is walked once. A table already walked is remembered as
  * (owning task, table) with a reference on the task only: a table counts as
- * seen while that task still points at it, which proves the table was not
- * freed and its address reused. Nothing takes a reference on the table
- * itself, so the walk never ends up closing another task's files. If the
- * set cannot grow, later sharers are walked again, costing duplicate lines.
+ * seen while that task still points at it, which proves it was not freed
+ * and reused by another task (the recorded task could only reach the same
+ * address again through two table switches, and what it opens after the
+ * walk visited it is not promised anyway). Nothing takes a reference on the
+ * table itself, so the walk never ends up closing another task's files. If
+ * the set cannot grow, later sharers are walked again, costing duplicate
+ * lines. The set is scanned linearly: O(threads x tables) per walk.
  */
 static bool devres_fd_table_seen(struct devres_open_file_check *chk,
 				 struct files_struct *files)
@@ -847,8 +856,10 @@ static void devres_fd_table_mark(struct devres_open_file_check *chk,
 	if (chk->nseen == chk->maxseen) {
 		unsigned int max = chk->maxseen ? chk->maxseen * 2 : 64;
 
-		seen = krealloc_array(chk->seen, max, sizeof(*seen),
-				      GFP_KERNEL);
+		if (max > DEVRES_SEEN_TABLES_MAX)
+			return;
+		seen = kvrealloc(chk->seen, array_size(max, sizeof(*seen)),
+				 GFP_KERNEL | __GFP_NOWARN);
 		if (!seen)
 			return;
 		chk->seen = seen;
@@ -875,6 +886,11 @@ static void devres_fd_table_mark(struct devres_open_file_check *chk,
  * and one file reference at a time, plus task references for the fd tables
  * already walked (dropped at the end of the walk) and references on
  * deferred debugfs files (dropped in devres_finish_open_file_check()).
+ *
+ * A deferred debugfs file keeps a file reference across
+ * devres_release_all(); debugfs_remove() does not wait for file references,
+ * only for operations in flight, so no in-tree remover blocks on it. A
+ * devres action that waited for all opens of its file to drain would.
  *
  * Holding a file reference means that if the owner closes the file
  * meanwhile, the final fput() (and so the driver's release callback) runs
@@ -934,8 +950,9 @@ void devres_check_open_files(struct device *dev,
 
 	while (chk->nseen)
 		put_task_struct(chk->seen[--chk->nseen].task);
-	kfree(chk->seen);
+	kvfree(chk->seen);
 	chk->seen = NULL;
+	chk->maxseen = 0;
 }
 
 /**
