@@ -166,23 +166,24 @@ config DEBUG_DEVRES_REFS
 	  Before a driver's managed (devm) allocations are freed, on unbind
 	  or after a failed probe, walk the open files of every thread and
 	  WARN if one still points into an allocation about to be freed:
-	  through file->private_data, the inode's i_private, or a holder
-	  registered by the owning subsystem (V4L2 registers
-	  video_devdata()). Such a pointer is a use-after-free waiting for
-	  the next file operation, typically close(). One WARN backtrace
-	  (which taints the kernel) is printed per allocation per unbind;
-	  further holders of the same allocation get one line each. A
-	  removed debugfs file on which debugfs itself refuses further
-	  operations (one created through its full proxy, or through one of
-	  its own guarded helpers such as debugfs_create_ulong() or
-	  debugfs_create_blob()) is reported at info level instead; its
-	  release callback is still named because it still runs on close. A
-	  debugfs file still live during the walk is decided after the
-	  managed resources were released, since drivers often remove their
-	  debugfs files through a devres action: removed by then is info,
-	  still live is a WARN. A file created with a debugfs _unsafe
-	  variant and the driver's own file_operations gets no such guard;
-	  it is deferred like a live debugfs file and then warned about.
+	  through file->private_data, the inode's i_private, the inode's
+	  cdev for a character device, or a holder registered by the owning
+	  subsystem (V4L2 registers video_devdata()). Such a pointer is a
+	  use-after-free waiting for the next file operation, typically
+	  close(). One WARN backtrace (which taints the kernel) is printed
+	  per allocation per unbind; further holders of the same allocation
+	  get one line each. A removed debugfs file on which debugfs itself
+	  refuses further operations (one created through its full proxy,
+	  or through one of its own guarded helpers such as
+	  debugfs_create_ulong() or debugfs_create_blob()) is reported at
+	  info level instead; its release callback is still named because
+	  it still runs on close. A debugfs file still live during the walk
+	  is decided after the managed resources were released, since
+	  drivers often remove their debugfs files through a devres action:
+	  removed by then is info, still live is a WARN. A file created
+	  with a debugfs _unsafe variant and the driver's own
+	  file_operations gets no such guard; it is deferred like a live
+	  debugfs file and then warned about.
 
 	  Limitations: only files in task fd tables are seen, so references
 	  held by sockets, epoll, io_uring or kernel-internal files are not;

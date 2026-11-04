@@ -3,7 +3,8 @@
  * Test vehicle for CONFIG_DEBUG_DEVRES_REFS.
  *
  * Registers one platform device bound to a driver that exposes two misc
- * devices and one debugfs file (see devm_refs_dbg_show() below):
+ * devices, one character device and one debugfs file (see
+ * devm_refs_dbg_show() below):
  *
  *   /dev/devm_refs_bad  - driver state allocated with devm_kzalloc(), so
  *                         it is freed on unbind even while the node is open.
@@ -11,11 +12,17 @@
  *                         embedded struct miscdevice) points into it.
  *   /dev/devm_refs_good - driver state refcounted and freed on last put,
  *                         so unbind with the node open is safe.
+ *   /dev/devm_refs_cdev - a struct cdev embedded in devm memory; an open
+ *                         file reaches it through inode->i_cdev.
  *
- * Unbinding the device with both nodes held open must produce exactly one
- * DEBUG_DEVRES_REFS warning, for the bad node. Closing the bad node after
- * unbind is a use-after-free that KASAN reports independently.
+ * Unbinding the device with all nodes held open must produce exactly two
+ * DEBUG_DEVRES_REFS warnings, for the bad node and for the cdev, and an
+ * info line for the debugfs file after release. Closing the bad node and
+ * the cdev node after unbind are use-after-frees that KASAN reports
+ * independently; the cdev close writes to the freed object (cdev_put()),
+ * so run this under KASAN only.
  */
+#include <linux/cdev.h>
 #include <linux/debugfs.h>
 #include <linux/fs.h>
 #include <linux/kref.h>
@@ -39,10 +46,36 @@ struct devm_refs_good {
 	u64 magic;
 };
 
+struct devm_refs_cdev {
+	struct cdev cdev;
+	u64 magic;
+};
+
 struct devm_refs_state {
 	struct devm_refs_bad *bad;
 	struct devm_refs_good *good;
+	struct devm_refs_cdev *cd;
+	struct class *class;
+	dev_t devt;
 	struct dentry *dbg;
+};
+
+static ssize_t devm_refs_cdev_read(struct file *file, char __user *buf,
+				   size_t len, loff_t *ppos)
+{
+	struct devm_refs_cdev *cd =
+		container_of(file_inode(file)->i_cdev, struct devm_refs_cdev, cdev);
+	char tmp[32];
+	int n;
+
+	n = scnprintf(tmp, sizeof(tmp), "%s\n",
+		      cd->magic == DEVM_REFS_MAGIC ? "ok" : "CORRUPT");
+	return simple_read_from_buffer(buf, len, ppos, tmp, n);
+}
+
+static const struct file_operations devm_refs_cdev_fops = {
+	.owner = THIS_MODULE,
+	.read = devm_refs_cdev_read,
 };
 
 /*
@@ -146,7 +179,7 @@ static const struct file_operations devm_refs_good_fops = {
 
 static int devm_refs_probe(struct platform_device *pdev)
 {
-	struct device *dev = &pdev->dev;
+	struct device *dev = &pdev->dev, *cdev_dev;
 	struct devm_refs_state *st;
 	int ret;
 
@@ -187,10 +220,45 @@ static int devm_refs_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_dereg_bad;
 
+	/* A cdev embedded in devm memory, with its own /dev node. */
+	st->cd = devm_kzalloc(dev, sizeof(*st->cd), GFP_KERNEL);
+	if (!st->cd) {
+		ret = -ENOMEM;
+		goto err_dereg_good;
+	}
+	st->cd->magic = DEVM_REFS_MAGIC;
+	ret = alloc_chrdev_region(&st->devt, 0, 1, "devm_refs_cdev");
+	if (ret)
+		goto err_dereg_good;
+	cdev_init(&st->cd->cdev, &devm_refs_cdev_fops);
+	st->cd->cdev.owner = THIS_MODULE;
+	ret = cdev_add(&st->cd->cdev, st->devt, 1);
+	if (ret)
+		goto err_region;
+	st->class = class_create("devm_refs");
+	if (IS_ERR(st->class)) {
+		ret = PTR_ERR(st->class);
+		goto err_cdev;
+	}
+	cdev_dev = device_create(st->class, dev, st->devt, NULL,
+				 "devm_refs_cdev");
+	if (IS_ERR(cdev_dev)) {
+		ret = PTR_ERR(cdev_dev);
+		goto err_class;
+	}
+
 	platform_set_drvdata(pdev, st);
-	dev_info(dev, "probed: /dev/devm_refs_bad and /dev/devm_refs_good\n");
+	dev_info(dev, "probed: /dev/devm_refs_bad, /dev/devm_refs_good, /dev/devm_refs_cdev\n");
 	return 0;
 
+err_class:
+	class_destroy(st->class);
+err_cdev:
+	cdev_del(&st->cd->cdev);
+err_region:
+	unregister_chrdev_region(st->devt, 1);
+err_dereg_good:
+	misc_deregister(&st->good->misc);
 err_dereg_bad:
 	misc_deregister(&st->bad->misc);
 err_free_good:
@@ -202,6 +270,10 @@ static void devm_refs_remove(struct platform_device *pdev)
 {
 	struct devm_refs_state *st = platform_get_drvdata(pdev);
 
+	device_destroy(st->class, st->devt);
+	class_destroy(st->class);
+	cdev_del(&st->cd->cdev);
+	unregister_chrdev_region(st->devt, 1);
 	misc_deregister(&st->good->misc);
 	misc_deregister(&st->bad->misc);
 	kref_put(&st->good->kref, devm_refs_good_free);

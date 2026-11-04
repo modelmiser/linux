@@ -813,6 +813,23 @@ static void devres_check_one_file(struct device *dev,
 						fd, file, "i_private");
 	}
 
+	/*
+	 * A character device file holds a reference on its cdev's kobject
+	 * (chrdev_open()), and inode->i_cdev is cleared only when that
+	 * kobject is released, so for an open non-O_PATH file the pointer
+	 * is stable here even after cdev_del(). A struct cdev embedded in
+	 * managed memory therefore shows up directly. Compared, never
+	 * dereferenced. i_cdev shares a union; only valid for S_ISCHR.
+	 */
+	if (S_ISCHR(file_inode(file)->i_mode)) {
+		const void *cdev = READ_ONCE(file_inode(file)->i_cdev);
+
+		region = devres_region_containing(chk->regions, chk->nr, cdev);
+		if (region)
+			devres_report_open_file(dev, chk, region, task, pnr,
+						fd, file, "i_cdev");
+	}
+
 	list_for_each_entry(hook, &devres_open_file_hooks, list) {
 		if (file->f_op != hook->fops)
 			continue;
