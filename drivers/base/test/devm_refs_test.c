@@ -299,7 +299,7 @@ static int __init devm_refs_test_init(void)
 		return ret;
 
 	devm_refs_pdev = platform_device_register_simple("devm_refs_test", -1,
-							  NULL, 0);
+							 NULL, 0);
 	if (IS_ERR(devm_refs_pdev)) {
 		platform_driver_unregister(&devm_refs_driver);
 		return PTR_ERR(devm_refs_pdev);
