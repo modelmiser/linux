@@ -775,7 +775,8 @@ sysfs_failed:
 		dev->bus->dma_cleanup(dev);
 pinctrl_bind_failed:
 	device_links_no_driver(dev);
-	device_unbind_cleanup(dev, ret != -EPROBE_DEFER);
+	/* A driver's own error arrives here negated (see above); either sign is a deferral. */
+	device_unbind_cleanup(dev, ret != -EPROBE_DEFER && ret != EPROBE_DEFER);
 done:
 	return ret;
 }

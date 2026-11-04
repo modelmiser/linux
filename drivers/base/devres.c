@@ -563,7 +563,9 @@ static int remove_nodes(struct device *dev,
  * from that task's task work, i.e. only after unbind returns, so a devres
  * action that waits for the file to close (snd_card_free() does) would
  * wait forever under device_lock. Dropped from a kernel thread it goes to
- * the delayed-fput work instead, which runs on its own.
+ * the delayed-fput work instead, which runs on its own. That work drains
+ * one global list in order, so the one remaining way to block is a file
+ * earlier in the same batch whose release needs a lock unbind holds.
  *
  * Phase 1 (devres_check_open_files) snapshots the regions and walks every
  * fd table. A hit on an ordinary file is a WARN at once. A hit on a debugfs
@@ -637,16 +639,19 @@ struct devres_region {
 /* A hit on a live debugfs file, looked up again after devres_release_all(). */
 struct devres_pending_ref {
 	const struct file *file;	/* identity only, never dereferenced */
+	const void *ptr;		/* the offending pointer value */
 	struct devres_region *region;
 	const char *what;
 	char comm[TASK_COMM_LEN];
-	pid_t pnr;
+	pid_t pnr, tgid;
 	unsigned int fd;
+	bool via_i_private;
 };
 
 /* Beyond this many distinct fd tables, later sharers are walked again. */
 #define DEVRES_SEEN_TABLES_MAX	1048576U
 #define DEVRES_PENDING_MAX	4096U
+#define DEVRES_HOOK_OBJECTS_MAX	8U
 
 /*
  * Copy the data regions of @dev's managed allocations. Taken before
@@ -736,6 +741,7 @@ static void devres_snapshot_hooks(struct devres_open_file_check *chk)
 			list_for_each_entry(hook, &devres_open_file_hooks, list) {
 				if (chk->nhooks == n)
 					break;
+				/* An owner that is unloading unregisters next. */
 				if (!try_module_get(hook->owner))
 					continue;
 				chk->hooks[chk->nhooks++] = hook;
@@ -838,10 +844,15 @@ static void devres_report_open_file(struct device *dev,
 		if (chk->npending < chk->maxpending) {
 			pend = &chk->pending[chk->npending++];
 			pend->file = file;
+			pend->via_i_private = !strcmp(what, "i_private");
+			pend->ptr = pend->via_i_private ?
+				READ_ONCE(file_inode(file)->i_private) :
+				READ_ONCE(file->private_data);
 			pend->region = region;
 			pend->what = what;
 			strscpy(pend->comm, comm, sizeof(pend->comm));
 			pend->pnr = pnr;
+			pend->tgid = task_tgid_nr(task);
 			pend->fd = fd;
 			return;
 		}
@@ -904,20 +915,18 @@ static void devres_check_one_file(struct device *dev,
 
 		if (file->f_op != hook->fops)
 			continue;
-		for (idx = 0; ; idx++) {
+		/* A holder ends with *what NULL; the cap guards a holder that never does. */
+		for (idx = 0; idx < DEVRES_HOOK_OBJECTS_MAX; idx++) {
 			const char *what = NULL;
 			const void *p = hook->holder(file, idx, &what);
 
-			if (idx && !what)
-				break;	/* holder has no more objects */
+			if (!what)
+				break;
 			region = devres_region_containing(chk->regions,
 							  chk->nr, p);
 			if (region)
 				devres_report_open_file(dev, chk, region, task,
-							pnr, fd, file,
-							what ?: "holder");
-			if (!what)
-				break;
+							pnr, fd, file, what);
 		}
 	}
 }
@@ -1037,26 +1046,49 @@ static int devres_finish_open_files(void *data)
 		struct file *file;
 		const void *p;
 
+		/* The recorded thread, or failing that its group leader. */
 		rcu_read_lock();
 		task = find_task_by_pid_ns(pend->pnr, &init_pid_ns);
+		if (!task)
+			task = find_task_by_pid_ns(pend->tgid, &init_pid_ns);
 		if (task)
 			get_task_struct(task);
 		rcu_read_unlock();
 		if (!task)
-			continue;	/* gone: nothing left to use the pointer */
+			continue;	/* process gone: nothing left to use the pointer */
+
+		/*
+		 * Find the recorded struct file anywhere in the task's table:
+		 * the descriptor may have moved (dup2) since the walk. The
+		 * address alone could be a reuse, so the same pointer value
+		 * in the same field is required too; a reopened file of the
+		 * same debugfs node satisfies both and dangles just the same.
+		 */
 		file = fget_task(task, pend->fd);
+		if (file && file != pend->file) {
+			fput(file);
+			file = NULL;
+		}
+		if (!file) {
+			unsigned int fd = 0;
+
+			while ((file = fget_task_next(task, &fd))) {
+				if (file == pend->file)
+					break;
+				fput(file);
+				fd++;
+			}
+		}
 		put_task_struct(task);
 		if (!file)
-			continue;
+			continue;	/* closed: nothing left to use the pointer */
 
-		/* Same file, still pointing into the region? Else closed/replaced. */
-		p = !strcmp(pend->what, "i_private") ?
+		p = pend->via_i_private ?
 			READ_ONCE(file_inode(file)->i_private) :
 			READ_ONCE(file->private_data);
-		if (file != pend->file ||
-		    devres_region_containing(chk->regions, chk->nr, p) != pend->region) {
+		if (p != pend->ptr) {
 			fput(file);
-			continue;
+			continue;	/* replaced */
 		}
 
 		if (debugfs_file_revoked(file, &real_fops))
@@ -1094,7 +1126,7 @@ static void devres_run_walk(struct devres_open_file_check *chk,
 	init_completion(&chk->done);
 	t = kthread_run(fn, chk, "%s/%s", name, dev_name(chk->dev));
 	if (IS_ERR(t)) {
-		dev_warn_once(chk->dev, "DEVRES: open-file check skipped, no thread\n");
+		dev_warn(chk->dev, "DEVRES: open-file check skipped, no thread\n");
 		return;
 	}
 	wait_for_completion(&chk->done);
@@ -1117,7 +1149,8 @@ static void devres_run_walk(struct devres_open_file_check *chk,
  * from the delayed-fput work, after this unbind has freed the memory if
  * the file pointed into it: that is the bug being reported, hit one close
  * later. A devres action that waits for such a close still completes,
- * since that work does not wait for unbind.
+ * since that work does not wait for unbind, unless a file earlier in the
+ * same delayed-fput batch has a release that needs a lock unbind holds.
  */
 void devres_check_open_files(struct device *dev,
 			     struct devres_open_file_check *chk)

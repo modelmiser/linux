@@ -1406,7 +1406,8 @@ static bool debugfs_unsafe_fops_safe_after_removal(const struct file_operations 
 	       !fops->splice_read && !fops->splice_eof && !fops->setlease &&
 	       !fops->fallocate && !fops->show_fdinfo &&
 	       !fops->copy_file_range && !fops->remap_file_range &&
-	       !fops->fadvise && !fops->uring_cmd && !fops->uring_cmd_iopoll;
+	       !fops->fadvise && !fops->uring_cmd && !fops->uring_cmd_iopoll &&
+	       !fops->init_dma_buf_io_ctx && !fops->fop_flags;
 }
 
 /**

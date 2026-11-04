@@ -1238,7 +1238,10 @@ EXPORT_SYMBOL_GPL(video_device_pipeline);
 /*
  * For CONFIG_DEBUG_DEVRES_REFS: an open V4L2 file keeps its struct
  * video_device alive via video_get(), and reaches it only through
- * video_devdata(); the driver's own state hangs off that device's drvdata.
+ * video_devdata(), a lookup in video_devices[] that does not touch the
+ * video_device itself. The driver's state behind video_get_drvdata() is
+ * not named: reaching it means dereferencing the video_device, which
+ * may itself sit in managed memory already freed by an earlier unbind.
  * Defined unconditionally; the registration calls are stubs when the
  * option is off.
  */
@@ -1246,18 +1249,10 @@ static const void *v4l2_devres_open_file_holder(struct file *file,
 						unsigned int idx,
 						const char **what)
 {
-	struct video_device *vdev = video_devdata(file);
-
-	switch (idx) {
-	case 0:
-		*what = "video_devdata";
-		return vdev;
-	case 1:
-		*what = "video_drvdata";
-		return vdev ? video_get_drvdata(vdev) : NULL;
-	default:
+	if (idx)
 		return NULL;
-	}
+	*what = "video_devdata";
+	return video_devdata(file);
 }
 
 static struct devres_open_file_hook v4l2_devres_open_file_hook = {

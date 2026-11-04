@@ -261,7 +261,7 @@ err_dereg_good:
 	misc_deregister(&st->good->misc);
 err_dereg_bad:
 	misc_deregister(&st->bad->misc);
-	/* The node was visible: drop the probe-time reference, never kfree. */
+	/* Registered or not, drop the probe-time reference; the free runs on zero. */
 	kref_put(&st->good->kref, devm_refs_good_free);
 	return ret;
 err_free_good:

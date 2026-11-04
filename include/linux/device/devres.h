@@ -296,9 +296,10 @@ struct file_operations;
  * @fops: the shared file_operations installed on such files at open
  * @owner: the module holding @holder; a walk pins it
  * @holder: returns the @idx-th object an open @fops file keeps alive and
- *          names it in *@what, or returns NULL with *@what left NULL when
- *          there are no more; may return NULL for a given @idx with *@what
- *          set if that object is absent
+ *          sets *@what to its name, for @idx from 0 up; leaves *@what NULL
+ *          when there are no more, which ends the sequence; may return
+ *          NULL with *@what set if that object is absent. At most eight
+ *          objects are consulted.
  *
  * CONFIG_DEBUG_DEVRES_REFS checks, on driver unbind or a failed probe,
  * whether any open file still points into memory devres is about to free. A
@@ -307,10 +308,12 @@ struct file_operations;
  * these. @holder is called on a kernel thread with a reference on @file
  * held and a module reference on @owner; it must not sleep on anything that
  * could wait for an unbind and must not dereference the objects it returns,
- * which may already be freed. @file is not const only because subsystem
- * accessors such as video_devdata() take a non-const file; @holder must not
- * modify it. The struct is defined unconditionally so that a subsystem can
- * keep its instance outside any #ifdef; the registration calls are empty
+ * nor anything else that may sit in managed memory of some device, which
+ * may already be freed; only what the open @file itself pins is safe.
+ * @file is not const only because subsystem accessors such as
+ * video_devdata() take a non-const file; @holder must not modify it. The
+ * struct is defined unconditionally so that a subsystem can keep its
+ * instance outside any #ifdef; the registration calls are empty
  * stubs when the option is off. The instance must be static or
  * zero-initialised, so that unregistering a hook whose registration failed
  * is a no-op. Unregister before the owning module's memory goes away,
