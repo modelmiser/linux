@@ -19,8 +19,9 @@
  * DEBUG_DEVRES_REFS warnings, for the bad node and for the cdev, and an
  * info line for the debugfs file after release. Closing the bad node and
  * the cdev node after unbind are use-after-frees that KASAN reports
- * independently; the cdev close writes to the freed object (cdev_put()),
- * so run this under KASAN only.
+ * independently; the cdev close reads the freed object in cdev_put() and
+ * then writes its kobject refcount in kobject_put(), so run this under
+ * KASAN only.
  */
 #include <linux/cdev.h>
 #include <linux/debugfs.h>
