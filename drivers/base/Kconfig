@@ -194,11 +194,15 @@ config DEBUG_DEVRES_REFS
 
 	  The walks run on a kernel thread, so a file reference the walk
 	  turns out to hold last is released from the delayed-fput work and
-	  never from the unbinding task; a devres action that waits for a
-	  file to close therefore does not deadlock on the walk, unless a
-	  file earlier in the same delayed-fput batch has a release that
-	  needs a lock unbind holds. No file reference is kept across the
-	  release of the managed resources.
+	  never from the unbinding task, so a devres action that waits for
+	  a file to close does not wait on the walk. What remains: that
+	  work drains one global list last-in-first-out with all its runs
+	  serialized, so a release there that needs a lock unbind holds (a
+	  usbfs close takes the USB parent lock a USB interface unbind
+	  holds) stalls every later delayed close, including one such an
+	  action is waiting for; without this option that close would have
+	  run from its owner's task work. No file reference is kept across
+	  the release of the managed resources.
 
 	  Limitations: only files in task fd tables are seen, so references
 	  held by sockets, epoll, io_uring or kernel-internal files are not;

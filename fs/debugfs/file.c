@@ -1407,7 +1407,11 @@ static bool debugfs_unsafe_fops_safe_after_removal(const struct file_operations 
 	       !fops->fallocate && !fops->show_fdinfo &&
 	       !fops->copy_file_range && !fops->remap_file_range &&
 	       !fops->fadvise && !fops->uring_cmd && !fops->uring_cmd_iopoll &&
+#ifndef CONFIG_MMU
+	       !fops->mmap_capabilities &&
+#endif
 	       !fops->init_dma_buf_io_ctx && !fops->fop_flags;
+	/* Keep in step with struct file_operations in include/linux/fs.h. */
 }
 
 /**

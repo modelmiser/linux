@@ -563,9 +563,13 @@ static int remove_nodes(struct device *dev,
  * from that task's task work, i.e. only after unbind returns, so a devres
  * action that waits for the file to close (snd_card_free() does) would
  * wait forever under device_lock. Dropped from a kernel thread it goes to
- * the delayed-fput work instead, which runs on its own. That work drains
- * one global list in order, so the one remaining way to block is a file
- * earlier in the same batch whose release needs a lock unbind holds.
+ * the delayed-fput work instead, which runs on its own. What remains: that
+ * work drains one global list last-in-first-out and all its runs are
+ * serialized, so a release there that needs a lock unbind holds (usbfs
+ * close takes the USB parent lock, which a USB interface unbind holds)
+ * stalls every later delayed close, including one a devres action of
+ * this unbind is waiting for. Without this option that close would have
+ * run from its owner's task work and never touched the list.
  *
  * Phase 1 (devres_check_open_files) snapshots the regions and walks every
  * fd table. A hit on an ordinary file is a WARN at once. A hit on a debugfs
@@ -1149,8 +1153,11 @@ static void devres_run_walk(struct devres_open_file_check *chk,
  * from the delayed-fput work, after this unbind has freed the memory if
  * the file pointed into it: that is the bug being reported, hit one close
  * later. A devres action that waits for such a close still completes,
- * since that work does not wait for unbind, unless a file earlier in the
- * same delayed-fput batch has a release that needs a lock unbind holds.
+ * since that work does not wait for unbind, unless a release ahead of it
+ * on the serialized delayed-fput worker needs a lock unbind holds. A file
+ * passed to another process after the walk and closed here is not found
+ * again in phase 2. If the region snapshot cannot be allocated the check
+ * is skipped silently.
  */
 void devres_check_open_files(struct device *dev,
 			     struct devres_open_file_check *chk)
