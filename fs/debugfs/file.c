@@ -11,6 +11,7 @@
 
 #include <linux/module.h>
 #include <linux/fs.h>
+#include <linux/magic.h>
 #include <linux/seq_file.h>
 #include <linux/pagemap.h>
 #include <linux/debugfs.h>
@@ -431,31 +432,6 @@ static int full_proxy_release(struct inode *inode, struct file *file)
 	return r;
 }
 
-/**
- * debugfs_file_release_fn - the release callback close() will run on @file
- * @file: an open debugfs file
- *
- * For debugging aids that find a stale pointer behind an open debugfs file
- * after the file has been removed: read/write/ioctl/poll are refused once
- * the dentry is unlinked, but the real release callback is still invoked on
- * close (see full_proxy_release()). Returns that callback, or NULL if none,
- * so the report can name it. Not for use in any other context.
- */
-const void *debugfs_file_release_fn(const struct file *file)
-{
-	const struct debugfs_fsdata *fsd;
-
-	if (file->f_op == &debugfs_full_proxy_file_operations) {
-		fsd = READ_ONCE(file->f_path.dentry->d_fsdata);
-		if (!fsd || !fsd->real_fops)
-			return NULL;
-		return fsd->real_fops->release;
-	}
-	if (file->f_op == &debugfs_full_short_proxy_file_operations)
-		return NULL;	/* short fops have no release */
-	return file->f_op->release;
-}
-EXPORT_SYMBOL_GPL(debugfs_file_release_fn);
 
 static int full_proxy_open_regular(struct inode *inode, struct file *filp)
 {
@@ -1399,3 +1375,58 @@ void debugfs_create_devm_seqfile(struct device *dev, const char *name,
 			    &debugfs_devm_entry_ops);
 }
 EXPORT_SYMBOL_GPL(debugfs_create_devm_seqfile);
+
+/* debugfs's own file_operations for _unsafe files that take the removal guard */
+static bool debugfs_unsafe_fops_guarded(const struct file_operations *fops)
+{
+	if (fops == &fops_blob || fops == &fops_bool || fops == &fops_str)
+		return true;
+	/* DEFINE_DEBUGFS_ATTRIBUTE(): read/write go through debugfs_file_get() */
+	return fops->read == debugfs_attr_read &&
+	       (!fops->write || fops->write == debugfs_attr_write ||
+		fops->write == debugfs_attr_write_signed);
+}
+
+/**
+ * debugfs_file_revoked - has debugfs cut @file off from its driver?
+ * @file: an open file, held by the caller
+ * @release: set to the release callback close() will still run, or NULL
+ *
+ * Returns true for a removed debugfs file whose read/write/ioctl/poll are
+ * refused with -EIO by debugfs itself: one created through the full proxy
+ * (debugfs_create_file() and the helpers built on it), or one of the
+ * _unsafe files whose file_operations belong to debugfs and take the
+ * removal guard (the DEFINE_DEBUGFS_ATTRIBUTE() family, blobs, bools,
+ * strings). full_proxy_release() still runs the real release callback on
+ * such a file, and documents that releasers must not rely on i_private, so
+ * @release names that callback for the caller. A file created with an
+ * _unsafe variant and the driver's own file_operations gets no guard from
+ * debugfs, and this returns false. For debugging aids that find a stale
+ * pointer behind an open debugfs file; not for use elsewhere.
+ */
+bool debugfs_file_revoked(const struct file *file, const void **release)
+{
+	const struct debugfs_fsdata *fsd;
+
+	*release = NULL;
+
+	if (!d_unlinked(file->f_path.dentry))
+		return false;
+
+	if (file->f_op == &debugfs_full_proxy_file_operations) {
+		/* Populated by full_proxy_open_regular(), pinned by the file. */
+		fsd = READ_ONCE(file->f_path.dentry->d_fsdata);
+		if (fsd && fsd->real_fops)
+			*release = fsd->real_fops->release;
+		return true;
+	}
+	if (file->f_op == &debugfs_full_short_proxy_file_operations)
+		return true;
+	if (file_inode(file)->i_sb->s_magic == DEBUGFS_MAGIC &&
+	    debugfs_unsafe_fops_guarded(file->f_op)) {
+		*release = file->f_op->release;
+		return true;
+	}
+	return false;
+}
+EXPORT_SYMBOL_GPL(debugfs_file_revoked);

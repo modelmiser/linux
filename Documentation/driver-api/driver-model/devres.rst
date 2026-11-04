@@ -228,9 +228,9 @@ reach - a struct cdev, video_device, miscdevice or debugfs private data
 embedded in it - must not live in devm_kzalloc()'d memory.  Allocate
 such state with kzalloc() and free it from the release callback of the
 object that user space holds, or from a refcount dropped on last close.
-CONFIG_DEBUG_DEVRES_REFS warns at release time when an open file still
-points into a managed allocation; see drivers/base/Kconfig for what it
-can and cannot see.
+CONFIG_DEBUG_DEVRES_REFS reports, at driver unbind, open files that
+still point into a managed allocation about to be freed; its Kconfig
+help text lists what it can and cannot see.
 
 
 5. Overhead

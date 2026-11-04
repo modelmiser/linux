@@ -140,7 +140,7 @@ static int devm_refs_probe(struct platform_device *pdev)
 	st->bad->misc.fops = &devm_refs_bad_fops;
 	st->bad->misc.parent = dev;
 
-	st->good = kzalloc(sizeof(*st->good), GFP_KERNEL);
+	st->good = kzalloc_obj(*st->good);
 	if (!st->good)
 		return -ENOMEM;
 	kref_init(&st->good->kref);

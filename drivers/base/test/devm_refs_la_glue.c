@@ -75,23 +75,34 @@ static int __init devm_refs_la_glue_init(void)
 		.id = PLATFORM_DEVID_NONE,
 		.properties = devm_refs_la_props,
 	};
-	struct platform_device *pdev;
+	struct platform_device *chip_pdev, *la_pdev;
 	int ret;
 
 	ret = platform_driver_register(&fake_chip_driver);
 	if (ret)
 		return ret;
-	pdev = platform_device_register_simple("devm-refs-fake-gpio", -1, NULL, 0);
-	if (IS_ERR(pdev))
-		return PTR_ERR(pdev);
+	chip_pdev = platform_device_register_simple("devm-refs-fake-gpio", -1,
+						    NULL, 0);
+	if (IS_ERR(chip_pdev)) {
+		ret = PTR_ERR(chip_pdev);
+		goto err_driver;
+	}
 
 	gpiod_add_lookup_table(&devm_refs_la_lookup);
-	pdev = platform_device_register_full(&info);
-	if (IS_ERR(pdev)) {
-		gpiod_remove_lookup_table(&devm_refs_la_lookup);
-		return PTR_ERR(pdev);
+	la_pdev = platform_device_register_full(&info);
+	if (IS_ERR(la_pdev)) {
+		ret = PTR_ERR(la_pdev);
+		goto err_chip;
 	}
 	pr_info("devm_refs_la_glue: fake chip and analyzer device registered\n");
 	return 0;
+
+err_chip:
+	gpiod_remove_lookup_table(&devm_refs_la_lookup);
+	platform_device_unregister(chip_pdev);
+err_driver:
+	platform_driver_unregister(&fake_chip_driver);
+	pr_err("devm_refs_la_glue: init failed: %d\n", ret);
+	return ret;
 }
 late_initcall(devm_refs_la_glue_init);

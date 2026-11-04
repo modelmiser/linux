@@ -1235,26 +1235,27 @@ EXPORT_SYMBOL_GPL(video_device_pipeline);
 /*
  *	Initialise video for linux
  */
-#ifdef CONFIG_DEBUG_DEVRES_REFS
-/* An open V4L2 file keeps its struct video_device alive, via video_get(). */
-static const void *v4l2_devres_file_holder(struct file *file)
+/*
+ * For CONFIG_DEBUG_DEVRES_REFS: an open V4L2 file keeps its struct
+ * video_device alive via video_get(), and reaches it only through
+ * video_devdata(). Defined unconditionally; the registration calls are
+ * stubs when the option is off.
+ */
+static const void *v4l2_devres_open_file_holder(struct file *file)
 {
 	return video_devdata(file);
 }
 
-static struct devres_file_ref_hook v4l2_devres_file_ref_hook = {
+static struct devres_open_file_hook v4l2_devres_open_file_hook = {
 	.fops = &v4l2_fops,
 	.name = "video_devdata",
-	.holder = v4l2_devres_file_holder,
+	.holder = v4l2_devres_open_file_holder,
 };
-#endif
 
 static int __init videodev_init(void)
 {
 	dev_t dev = MKDEV(VIDEO_MAJOR, 0);
 	int ret;
-
-	devres_register_file_ref_hook(&v4l2_devres_file_ref_hook);
 
 	pr_info("Linux video capture interface: v2.00\n");
 	ret = register_chrdev_region(dev, VIDEO_NUM_DEVICES, VIDEO_NAME);
@@ -1271,14 +1272,18 @@ static int __init videodev_init(void)
 		return -EIO;
 	}
 
+	/* Last, so no failure above can leave the hook registered. */
+	if (devres_register_open_file_hook(&v4l2_devres_open_file_hook))
+		pr_warn("videodev: devres open-file hook not registered\n");
+
 	return 0;
 }
 
 static void __exit videodev_exit(void)
 {
-	devres_unregister_file_ref_hook(&v4l2_devres_file_ref_hook);
-
 	dev_t dev = MKDEV(VIDEO_MAJOR, 0);
+
+	devres_unregister_open_file_hook(&v4l2_devres_open_file_hook);
 
 	class_unregister(&video_class);
 	unregister_chrdev_region(dev, VIDEO_NUM_DEVICES);

@@ -37,7 +37,7 @@ config DEVM_REFS_TEST
 
 config DEVM_REFS_LA_GLUE
 	bool "Instantiate gpio-sloppy-logic-analyzer on a fake GPIO chip (DEBUG_DEVRES_REFS test)"
-	depends on DEBUG_DEVRES_REFS && GPIO_SLOPPY_LOGIC_ANALYZER=y
+	depends on DEBUG_DEVRES_REFS && GPIOLIB && GPIO_SLOPPY_LOGIC_ANALYZER=y
 	help
 	  Registers a platform device for the sloppy logic analyzer bound to
 	  lines 0 and 1 of a built-in fake non-sleeping GPIO chip, so the

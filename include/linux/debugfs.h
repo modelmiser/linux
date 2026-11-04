@@ -166,7 +166,7 @@ void *debugfs_get_aux(const struct file *file);
 
 int debugfs_file_get(struct dentry *dentry);
 void debugfs_file_put(struct dentry *dentry);
-const void *debugfs_file_release_fn(const struct file *file);
+bool debugfs_file_revoked(const struct file *file, const void **release);
 
 ssize_t debugfs_attr_read(struct file *file, char __user *buf,
 			size_t len, loff_t *ppos);
@@ -337,9 +337,11 @@ static inline int debugfs_file_get(struct dentry *dentry)
 static inline void debugfs_file_put(struct dentry *dentry)
 { }
 
-static inline const void *debugfs_file_release_fn(const struct file *file)
+static inline bool debugfs_file_revoked(const struct file *file,
+					const void **release)
 {
-	return NULL;
+	*release = NULL;
+	return false;
 }
 
 static inline ssize_t debugfs_attr_read(struct file *file, char __user *buf,

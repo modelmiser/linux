@@ -242,6 +242,11 @@ void devres_for_each_res(struct device *dev, dr_release_t release,
 			 void (*fn)(struct device *, void *, void *),
 			 void *data);
 int devres_release_all(struct device *dev);
+#ifdef CONFIG_DEBUG_DEVRES_REFS
+void devres_check_open_files(struct device *dev);
+#else
+static inline void devres_check_open_files(struct device *dev) { }
+#endif
 void device_block_probing(void);
 void device_unblock_probing(void);
 void deferred_probe_extend_timeout(void);
