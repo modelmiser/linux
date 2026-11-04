@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/percpu.h>
+#include <linux/cdev.h>
 #include <linux/dcache.h>
 #include <linux/debugfs.h>
 #include <linux/file.h>
@@ -544,6 +545,31 @@ static int remove_nodes(struct device *dev,
 }
 
 #ifdef CONFIG_DEBUG_DEVRES_REFS
+/*
+ * Subsystems whose struct file does not point at the driver object
+ * directly (V4L2 keeps it behind a per-open file handle) register a
+ * hook keyed on their shared file_operations that returns the object
+ * a given open file keeps alive.
+ */
+static LIST_HEAD(devres_file_ref_hooks);
+static DEFINE_SPINLOCK(devres_file_ref_hooks_lock);
+
+void devres_register_file_ref_hook(struct devres_file_ref_hook *hook)
+{
+	spin_lock(&devres_file_ref_hooks_lock);
+	list_add_tail(&hook->list, &devres_file_ref_hooks);
+	spin_unlock(&devres_file_ref_hooks_lock);
+}
+EXPORT_SYMBOL_GPL(devres_register_file_ref_hook);
+
+void devres_unregister_file_ref_hook(struct devres_file_ref_hook *hook)
+{
+	spin_lock(&devres_file_ref_hooks_lock);
+	list_del(&hook->list);
+	spin_unlock(&devres_file_ref_hooks_lock);
+}
+EXPORT_SYMBOL_GPL(devres_unregister_file_ref_hook);
+
 static struct devres_node *devres_find_containing(struct list_head *nodes,
 						  const void *p)
 {
@@ -616,12 +642,30 @@ static void devres_check_file_refs(struct device *dev, struct list_head *nodes)
 		struct file *file;
 
 		while ((file = fget_task_next(task, &fd))) {
+			struct inode *inode = file_inode(file);
+			struct devres_file_ref_hook *hook;
+
 			devres_check_file_ref(dev, nodes, task, fd, file,
 					      "private_data",
 					      file->private_data);
 			devres_check_file_ref(dev, nodes, task, fd, file,
-					      "i_private",
-					      file_inode(file)->i_private);
+					      "i_private", inode->i_private);
+			/* i_cdev shares a union; only valid for char devices */
+			if (S_ISCHR(inode->i_mode) && inode->i_cdev) {
+				devres_check_file_ref(dev, nodes, task, fd, file,
+						      "i_cdev", inode->i_cdev);
+				devres_check_file_ref(dev, nodes, task, fd, file,
+						      "i_cdev->kobj.parent",
+						      inode->i_cdev->kobj.parent);
+			}
+			spin_lock(&devres_file_ref_hooks_lock);
+			list_for_each_entry(hook, &devres_file_ref_hooks, list)
+				if (file->f_op == hook->fops)
+					devres_check_file_ref(dev, nodes, task,
+							      fd, file,
+							      hook->name,
+							      hook->holder(file));
+			spin_unlock(&devres_file_ref_hooks_lock);
 			fput(file);
 			fd++;
 		}

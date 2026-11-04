@@ -11,6 +11,8 @@
 #include <asm/bug.h>
 #include <asm/percpu.h>
 
+#include <linux/list.h>
+
 struct device;
 struct device_node;
 struct resource;
@@ -283,5 +285,27 @@ static inline int __devm_add_action_or_reset(struct device *dev, void (*action)(
 	__devm_add_action_or_reset(dev, action, data, #action)
 
 bool devm_is_action_added(struct device *dev, void (*action)(void *), void *data);
+
+/*
+ * CONFIG_DEBUG_DEVRES_REFS: let a subsystem tell the check which driver
+ * object an open file of its file_operations keeps alive, when that is not
+ * file->private_data or the inode's i_private.
+ */
+struct file;
+struct file_operations;
+struct devres_file_ref_hook {
+	struct list_head list;
+	const struct file_operations *fops;
+	const char *name;
+	const void *(*holder)(struct file *file);
+};
+
+#ifdef CONFIG_DEBUG_DEVRES_REFS
+void devres_register_file_ref_hook(struct devres_file_ref_hook *hook);
+void devres_unregister_file_ref_hook(struct devres_file_ref_hook *hook);
+#else
+static inline void devres_register_file_ref_hook(struct devres_file_ref_hook *hook) {}
+static inline void devres_unregister_file_ref_hook(struct devres_file_ref_hook *hook) {}
+#endif
 
 #endif /* _DEVICE_DEVRES_H_ */

@@ -1235,10 +1235,26 @@ EXPORT_SYMBOL_GPL(video_device_pipeline);
 /*
  *	Initialise video for linux
  */
+#ifdef CONFIG_DEBUG_DEVRES_REFS
+/* An open V4L2 file keeps its struct video_device alive, via video_get(). */
+static const void *v4l2_devres_file_holder(struct file *file)
+{
+	return video_devdata(file);
+}
+
+static struct devres_file_ref_hook v4l2_devres_file_ref_hook = {
+	.fops = &v4l2_fops,
+	.name = "video_devdata",
+	.holder = v4l2_devres_file_holder,
+};
+#endif
+
 static int __init videodev_init(void)
 {
 	dev_t dev = MKDEV(VIDEO_MAJOR, 0);
 	int ret;
+
+	devres_register_file_ref_hook(&v4l2_devres_file_ref_hook);
 
 	pr_info("Linux video capture interface: v2.00\n");
 	ret = register_chrdev_region(dev, VIDEO_NUM_DEVICES, VIDEO_NAME);
@@ -1260,6 +1276,8 @@ static int __init videodev_init(void)
 
 static void __exit videodev_exit(void)
 {
+	devres_unregister_file_ref_hook(&v4l2_devres_file_ref_hook);
+
 	dev_t dev = MKDEV(VIDEO_MAJOR, 0);
 
 	class_unregister(&video_class);
