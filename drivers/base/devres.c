@@ -11,6 +11,7 @@
 #include <linux/slab.h>
 #include <linux/percpu.h>
 #include <linux/dcache.h>
+#include <linux/debugfs.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/magic.h>
@@ -578,14 +579,17 @@ static void devres_check_file_ref(struct device *dev, struct list_head *nodes,
 	 * A debugfs file that has already been removed is guarded by debugfs
 	 * itself: read/write/ioctl/poll on the held fd fail with -EIO (see
 	 * __debugfs_file_get()). The pointer is still dangling, and the real
-	 * release callback is still invoked on close, so report it, but do
-	 * not treat it as the unconditional use-after-free a live cdev is.
+	 * release callback is still invoked on close (full_proxy_release()
+	 * documents that releasers must not rely on i_private), so report it
+	 * and name that callback, but do not treat it as the unconditional
+	 * use-after-free a live cdev is.
 	 */
 	if (file_inode(file)->i_sb->s_magic == DEBUGFS_MAGIC &&
 	    d_unlinked(dentry)) {
-		dev_info(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pd) in %s[%d] at release (removed debugfs file: ops guarded, release callback is not)\n",
+		dev_info(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pd) in %s[%d] at release (removed debugfs file: ops guarded; close will still call release %ps)\n",
 			 node->name, node->size, what, fd, dentry,
-			 task->comm, task_pid_nr(task));
+			 task->comm, task_pid_nr(task),
+			 debugfs_file_release_fn(file));
 		return;
 	}
 

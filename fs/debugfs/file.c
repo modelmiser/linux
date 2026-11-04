@@ -431,6 +431,32 @@ static int full_proxy_release(struct inode *inode, struct file *file)
 	return r;
 }
 
+/**
+ * debugfs_file_release_fn - the release callback close() will run on @file
+ * @file: an open debugfs file
+ *
+ * For debugging aids that find a stale pointer behind an open debugfs file
+ * after the file has been removed: read/write/ioctl/poll are refused once
+ * the dentry is unlinked, but the real release callback is still invoked on
+ * close (see full_proxy_release()). Returns that callback, or NULL if none,
+ * so the report can name it. Not for use in any other context.
+ */
+const void *debugfs_file_release_fn(const struct file *file)
+{
+	const struct debugfs_fsdata *fsd;
+
+	if (file->f_op == &debugfs_full_proxy_file_operations) {
+		fsd = READ_ONCE(file->f_path.dentry->d_fsdata);
+		if (!fsd || !fsd->real_fops)
+			return NULL;
+		return fsd->real_fops->release;
+	}
+	if (file->f_op == &debugfs_full_short_proxy_file_operations)
+		return NULL;	/* short fops have no release */
+	return file->f_op->release;
+}
+EXPORT_SYMBOL_GPL(debugfs_file_release_fn);
+
 static int full_proxy_open_regular(struct inode *inode, struct file *filp)
 {
 	struct dentry *dentry = F_DENTRY(filp);
