@@ -167,35 +167,45 @@ config DEBUG_DEVRES_REFS
 	  or after a failed probe, walk the open files of every thread and
 	  WARN if one still points into an allocation about to be freed:
 	  through file->private_data, the inode's i_private, the inode's
-	  cdev for a character device, or a holder registered by the owning
-	  subsystem (V4L2 registers video_devdata()). Such a pointer is a
-	  use-after-free waiting for the next file operation, typically
-	  close(). One WARN backtrace (which taints the kernel) is printed
-	  per allocation per unbind; further holders of the same allocation
-	  get one line each. A removed debugfs file on which debugfs itself
-	  refuses further operations (one created through its full proxy,
-	  or through one of its own guarded helpers such as
-	  debugfs_create_ulong() or debugfs_create_blob()) is reported at
-	  info level instead; its release callback is still named because
-	  it still runs on close. A debugfs file still live during the walk
-	  is decided after the managed resources were released, since
-	  drivers often remove their debugfs files through a devres action:
-	  removed by then is info, still live is a WARN. A file created
-	  with a debugfs _unsafe variant and the driver's own
-	  file_operations gets no such guard; it is deferred like a live
-	  debugfs file and then warned about.
+	  cdev for a character device, or an object a subsystem names
+	  through a hook (V4L2 names the video_device and its drvdata). Such
+	  a pointer dangles once the memory is freed; it is a use-after-free
+	  if anything dereferences it afterwards, which for private_data is
+	  any operation, for a cdev its release on close, and for a debugfs
+	  file a new open or an unguarded release. One WARN backtrace (which
+	  taints the kernel) is printed per allocation per unbind; further
+	  holders of the same allocation get one line each.
+
+	  A removed debugfs file on which debugfs refuses further operations
+	  (one created through its full proxy, or through one of its own
+	  guarded helpers such as debugfs_create_ulong() or
+	  debugfs_create_blob()) is reported at info level if its release
+	  callback is one that cannot touch the data, and warned about
+	  naming the callback otherwise. A debugfs file still live during
+	  the walk is decided after the managed resources were released,
+	  since drivers often remove their debugfs files through a devres
+	  action: removed and safe to close by then is info, anything else
+	  is a WARN. A file created with a debugfs _unsafe variant and the
+	  driver's own file_operations gets no guard; it is deferred like a
+	  live debugfs file and then warned about.
+
+	  The walks run on a kernel thread, so a file reference the walk
+	  turns out to hold last is released from the delayed-fput work and
+	  never from the unbinding task; a devres action that waits for a
+	  file to close therefore cannot deadlock on the walk. No file
+	  reference is kept across the release of the managed resources.
 
 	  Limitations: only files in task fd tables are seen, so references
 	  held by sockets, epoll, io_uring or kernel-internal files are not;
-	  the check runs from the unbind and probe-failure paths only, not
-	  on other devres release paths; it finds pointers that are dangling
-	  at that moment, not teardown races in which an operation already
-	  in flight outlives the free, nor whether a debugfs removal action
-	  ran before or after the free; and a driver that keeps freeing devm
-	  memory after remove() returned can make it misreport. The walk is
-	  linear in threads times distinct fd tables and also runs on every
-	  deferred probe that has already made managed allocations, which
-	  costs boot time on systems with many tasks.
+	  the check runs from the unbind and failed-probe paths only, not on
+	  probe deferral nor on other devres release paths; it finds pointers
+	  that are dangling at that moment, not teardown races, nor whether
+	  a debugfs removal action ran before or after the free; a managed
+	  allocation whose release waits for its files to close first (an
+	  ALSA card) is not about to be freed, so a hit on it is a false
+	  positive; a driver that keeps freeing devm memory after remove()
+	  returned can make it misreport. The walk is linear in threads
+	  times distinct fd tables and costs every unbind and failed probe.
 
 	  This is a slow debug check intended for test systems.
 

@@ -291,33 +291,38 @@ struct file_operations;
 
 /**
  * struct devres_open_file_hook - how an open file of one file_operations
- *                                reaches the driver object it keeps alive
+ *                                reaches the driver objects it keeps alive
  * @list: internal
  * @fops: the shared file_operations installed on such files at open
- * @name: label for reports, e.g. "video_devdata"
- * @holder: returns the object an open @fops file keeps alive, or NULL
+ * @owner: the module holding @holder; a walk pins it
+ * @holder: returns the @idx-th object an open @fops file keeps alive and
+ *          names it in *@what, or returns NULL with *@what left NULL when
+ *          there are no more; may return NULL for a given @idx with *@what
+ *          set if that object is absent
  *
- * CONFIG_DEBUG_DEVRES_REFS checks, on driver unbind or a failed probe, whether any open file
- * still points into memory devres is about to free. A subsystem whose files
- * do not reach that object through file->private_data or the inode's
- * i_private registers one of these. @holder is called in process context,
- * with a reference on @file held and the hook mutex held; it must not
- * sleep on anything that could wait for an unbind, must not register or
- * unregister hooks, and must not dereference the object it returns, which
- * may already be freed. @file is not const only because subsystem accessors
- * such as video_devdata() take a non-const file; @holder must not modify it.
- * The struct is defined unconditionally so that a subsystem can keep its
- * instance outside any #ifdef; the registration calls are empty stubs when
- * the option is off. The instance must be static or zero-initialised, so
- * that unregistering a hook whose registration failed is a no-op.
- * Unregister before the owning module's memory goes away, including on a
- * failed module init.
+ * CONFIG_DEBUG_DEVRES_REFS checks, on driver unbind or a failed probe,
+ * whether any open file still points into memory devres is about to free. A
+ * subsystem whose files do not reach their objects through
+ * file->private_data, the inode's i_private or i_cdev registers one of
+ * these. @holder is called on a kernel thread with a reference on @file
+ * held and a module reference on @owner; it must not sleep on anything that
+ * could wait for an unbind and must not dereference the objects it returns,
+ * which may already be freed. @file is not const only because subsystem
+ * accessors such as video_devdata() take a non-const file; @holder must not
+ * modify it. The struct is defined unconditionally so that a subsystem can
+ * keep its instance outside any #ifdef; the registration calls are empty
+ * stubs when the option is off. The instance must be static or
+ * zero-initialised, so that unregistering a hook whose registration failed
+ * is a no-op. Unregister before the owning module's memory goes away,
+ * including on a failed module init.
  */
+struct module;
 struct devres_open_file_hook {
 	struct list_head list;
 	const struct file_operations *fops;
-	const char *name;
-	const void *(*holder)(struct file *file);
+	struct module *owner;
+	const void *(*holder)(struct file *file, unsigned int idx,
+			      const char **what);
 };
 
 #ifdef CONFIG_DEBUG_DEVRES_REFS

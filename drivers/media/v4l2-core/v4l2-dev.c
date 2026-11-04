@@ -1238,17 +1238,31 @@ EXPORT_SYMBOL_GPL(video_device_pipeline);
 /*
  * For CONFIG_DEBUG_DEVRES_REFS: an open V4L2 file keeps its struct
  * video_device alive via video_get(), and reaches it only through
- * video_devdata(). Defined unconditionally; the registration calls are
- * stubs when the option is off.
+ * video_devdata(); the driver's own state hangs off that device's drvdata.
+ * Defined unconditionally; the registration calls are stubs when the
+ * option is off.
  */
-static const void *v4l2_devres_open_file_holder(struct file *file)
+static const void *v4l2_devres_open_file_holder(struct file *file,
+						unsigned int idx,
+						const char **what)
 {
-	return video_devdata(file);
+	struct video_device *vdev = video_devdata(file);
+
+	switch (idx) {
+	case 0:
+		*what = "video_devdata";
+		return vdev;
+	case 1:
+		*what = "video_drvdata";
+		return vdev ? video_get_drvdata(vdev) : NULL;
+	default:
+		return NULL;
+	}
 }
 
 static struct devres_open_file_hook v4l2_devres_open_file_hook = {
 	.fops = &v4l2_fops,
-	.name = "video_devdata",
+	.owner = THIS_MODULE,
 	.holder = v4l2_devres_open_file_holder,
 };
 

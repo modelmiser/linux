@@ -10,6 +10,7 @@
  * shared outside of the drivers/base/ directory.
  *
  */
+#include <linux/completion.h>
 #include <linux/notifier.h>
 
 /**
@@ -250,11 +251,16 @@ struct devres_seen_table {
 
 struct devres_open_file_check {
 #ifdef CONFIG_DEBUG_DEVRES_REFS
+	struct device *dev;
 	struct devres_region *regions;
 	unsigned int nr;
+	struct devres_open_file_hook **hooks;
+	unsigned int nhooks;
 	struct devres_seen_table *seen;
 	unsigned int nseen, maxseen;
-	struct list_head pending;
+	struct devres_pending_ref *pending;
+	unsigned int npending, maxpending;
+	struct completion done;
 #endif
 };
 

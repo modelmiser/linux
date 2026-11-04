@@ -591,13 +591,14 @@ static ssize_t state_synced_show(struct device *dev,
 }
 static DEVICE_ATTR_RW(state_synced);
 
-static void device_unbind_cleanup(struct device *dev)
+static void device_unbind_cleanup(struct device *dev, bool check_open_files)
 {
 	struct devres_open_file_check chk = {};
 
 	if (dev->driver->p_cb.post_unbind_rust)
 		dev->driver->p_cb.post_unbind_rust(dev);
-	devres_check_open_files(dev, &chk);
+	if (check_open_files)
+		devres_check_open_files(dev, &chk);
 	devres_release_all(dev);
 	devres_finish_open_file_check(dev, &chk);
 	arch_teardown_dma_ops(dev);
@@ -748,7 +749,7 @@ re_probe:
 		driver_sysfs_remove(dev);
 		if (dev->bus && dev->bus->dma_cleanup)
 			dev->bus->dma_cleanup(dev);
-		device_unbind_cleanup(dev);
+		device_unbind_cleanup(dev, true);
 
 		goto re_probe;
 	}
@@ -774,7 +775,7 @@ sysfs_failed:
 		dev->bus->dma_cleanup(dev);
 pinctrl_bind_failed:
 	device_links_no_driver(dev);
-	device_unbind_cleanup(dev);
+	device_unbind_cleanup(dev, ret != -EPROBE_DEFER);
 done:
 	return ret;
 }
@@ -1363,7 +1364,7 @@ static void __device_release_driver(struct device *dev, struct device *parent)
 		if (dev->bus && dev->bus->dma_cleanup)
 			dev->bus->dma_cleanup(dev);
 
-		device_unbind_cleanup(dev);
+		device_unbind_cleanup(dev, true);
 		device_links_driver_cleanup(dev);
 
 		klist_remove(&dev->p->knode_driver);

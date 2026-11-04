@@ -1390,15 +1390,44 @@ static bool debugfs_unsafe_fops_safe_after_removal(const struct file_operations 
 		return true;
 	/*
 	 * DEFINE_DEBUGFS_ATTRIBUTE(): read/write go through
-	 * debugfs_file_get(), release only frees the simple_attr, and
-	 * the macro sets no other operation.
+	 * debugfs_file_get(), release only frees the simple_attr, and the
+	 * macro sets no other operation at all.
 	 */
 	return fops->read == debugfs_attr_read &&
 	       (fops->write == debugfs_attr_write ||
 		fops->write == debugfs_attr_write_signed) &&
 	       fops->release == simple_attr_release &&
-	       !fops->llseek && !fops->unlocked_ioctl && !fops->compat_ioctl &&
-	       !fops->poll && !fops->mmap;
+	       !fops->llseek && !fops->read_iter && !fops->write_iter &&
+	       !fops->iopoll && !fops->iterate_shared && !fops->poll &&
+	       !fops->unlocked_ioctl && !fops->compat_ioctl && !fops->mmap &&
+	       !fops->mmap_prepare && !fops->flush && !fops->fsync &&
+	       !fops->fasync && !fops->lock && !fops->get_unmapped_area &&
+	       !fops->check_flags && !fops->flock && !fops->splice_write &&
+	       !fops->splice_read && !fops->splice_eof && !fops->setlease &&
+	       !fops->fallocate && !fops->show_fdinfo &&
+	       !fops->copy_file_range && !fops->remap_file_range &&
+	       !fops->fadvise && !fops->uring_cmd && !fops->uring_cmd_iopoll;
+}
+
+/**
+ * debugfs_file_release_safe - will close() of a removed file leave the
+ *                             driver's data alone?
+ * @fops: the file_operations debugfs_file_revoked() handed back, or NULL
+ *
+ * Return: true if @fops has no release callback, or one of the generic
+ * ones that only free what open() allocated (seq_file, simple_attr, u32
+ * array). A driver's own release may dereference i_private or
+ * private_data; full_proxy_release() documents that it must not, but
+ * nothing enforces it.
+ */
+bool debugfs_file_release_safe(const struct file_operations *fops)
+{
+	if (!fops || !fops->release)
+		return true;
+	return fops->release == single_release ||
+	       fops->release == seq_release ||
+	       fops->release == simple_attr_release ||
+	       fops->release == u32_array_release;
 }
 
 /**
