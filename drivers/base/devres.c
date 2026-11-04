@@ -16,7 +16,9 @@
 #include <linux/pid.h>
 #include <linux/pid_namespace.h>
 #include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/sched/task.h>
+#include <linux/timekeeping.h>
 
 #include <asm/sections.h>
 
@@ -556,8 +558,17 @@ static int remove_nodes(struct device *dev,
  * and so from any context in which a final put_device() is legal.
  */
 static LIST_HEAD(devres_open_file_hooks);
+/* Lock order: device_lock(dev) -> devres_open_file_hooks_lock -> task_lock(). */
 static DEFINE_MUTEX(devres_open_file_hooks_lock);
 
+/**
+ * devres_register_open_file_hook - tell the open-file check how to reach a
+ *                                  subsystem's object from an open file
+ * @hook: static or zero-initialised hook with @fops, @name and @holder set
+ *
+ * Return: 0, -EINVAL if a field is missing, -EEXIST if @fops already has a
+ * hook.
+ */
 int devres_register_open_file_hook(struct devres_open_file_hook *hook)
 {
 	struct devres_open_file_hook *h;
@@ -580,6 +591,11 @@ out:
 }
 EXPORT_SYMBOL_GPL(devres_register_open_file_hook);
 
+/**
+ * devres_unregister_open_file_hook - remove a hook; a no-op if it was never
+ *                                    registered (static or zero-initialised)
+ * @hook: the hook passed to devres_register_open_file_hook()
+ */
 void devres_unregister_open_file_hook(struct devres_open_file_hook *hook)
 {
 	/* Never registered (static zero) or already unregistered: nothing to do. */
@@ -628,8 +644,8 @@ static unsigned int devres_snapshot_regions(struct device *dev,
 	/*
 	 * The list may have changed between the two passes (a driver still
 	 * calling devm_* after remove() returned, which is its own bug).
-	 * Growth is bounded by @n; shrinkage leaves zeroed entries, which
-	 * can never contain a pointer, and @i below the count.
+	 * Growth is bounded by @n (extra nodes are not checked); shrinkage
+	 * leaves @i below @n, and only [0, @i) is returned.
 	 */
 	spin_lock_irqsave(&dev->devres_lock, flags);
 	list_for_each_entry(node, &dev->devres_head, entry) {
@@ -671,8 +687,9 @@ static struct devres_region *devres_region_containing(struct devres_region *r,
 
 static void devres_report_open_file(struct device *dev,
 				    struct devres_region *region,
-				    struct task_struct *task, unsigned int fd,
-				    struct file *file, const char *what)
+				    struct task_struct *task, pid_t pnr,
+				    unsigned int fd, struct file *file,
+				    const char *what)
 {
 	const struct file_operations *real_fops;
 	char comm[TASK_COMM_LEN];
@@ -689,11 +706,11 @@ static void devres_report_open_file(struct device *dev,
 		if (real_fops && real_fops->release)
 			dev_info(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pD3) in %s[%d] at unbind: removed debugfs file, ops refused by debugfs, close will still call %ps\n",
 				 region->name, region->size, what, fd, file,
-				 comm, task_pid_nr(task), real_fops->release);
+				 comm, pnr, real_fops->release);
 		else
 			dev_info(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pD3) in %s[%d] at unbind: removed debugfs file, ops refused by debugfs, no release callback\n",
 				 region->name, region->size, what, fd, file,
-				 comm, task_pid_nr(task));
+				 comm, pnr);
 		return;
 	}
 
@@ -702,18 +719,18 @@ static void devres_report_open_file(struct device *dev,
 		region->warned = true;
 		dev_WARN(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pD3) in %s[%d] at unbind\n",
 			 region->name, region->size, what, fd, file, comm,
-			 task_pid_nr(task));
+			 pnr);
 	} else {
 		dev_warn(dev, "DEVRES %s (%zu bytes) still referenced by %s of fd %u (%pD3) in %s[%d] at unbind\n",
 			 region->name, region->size, what, fd, file, comm,
-			 task_pid_nr(task));
+			 pnr);
 	}
 }
 
 static void devres_check_one_file(struct device *dev,
 				  struct devres_region *regions,
 				  unsigned int nr, struct task_struct *task,
-				  unsigned int fd, struct file *file)
+				  pid_t pnr, unsigned int fd, struct file *file)
 {
 	struct devres_open_file_hook *hook;
 	struct devres_region *region;
@@ -726,14 +743,14 @@ static void devres_check_one_file(struct device *dev,
 	pd = READ_ONCE(file->private_data);
 	region = devres_region_containing(regions, nr, pd);
 	if (region)
-		devres_report_open_file(dev, region, task, fd, file,
+		devres_report_open_file(dev, region, task, pnr, fd, file,
 					"private_data");
 
 	ip = READ_ONCE(file_inode(file)->i_private);
 	if (ip != pd) {
 		region = devres_region_containing(regions, nr, ip);
 		if (region)
-			devres_report_open_file(dev, region, task, fd, file,
+			devres_report_open_file(dev, region, task, pnr, fd, file,
 						"i_private");
 	}
 
@@ -743,7 +760,7 @@ static void devres_check_one_file(struct device *dev,
 		region = devres_region_containing(regions, nr,
 						  hook->holder(file));
 		if (region)
-			devres_report_open_file(dev, region, task, fd, file,
+			devres_report_open_file(dev, region, task, pnr, fd, file,
 						hook->name);
 	}
 }
@@ -752,20 +769,26 @@ static void devres_check_one_file(struct device *dev,
  * Is @task's fd table already walked through another thread of its group?
  * Called under rcu_read_lock() with @task still hashed, so its group
  * leader and siblings cannot have been freed. Threads are visited in pid
- * order; the lowest-pid live thread sharing a table is the one walked.
+ * order, so among the threads that existed when the walk started the
+ * lowest-pid live one sharing a table is the one walked. A thread created
+ * during the walk may have a lower pid (pid allocation wraps) without
+ * having been visited, so it never counts as covering another.
  */
-static bool devres_fd_table_covered(struct task_struct *task)
+static bool devres_fd_table_covered(struct task_struct *task, pid_t nr,
+				    u64 walk_start)
 {
 	struct files_struct *files = READ_ONCE(task->files);
-	pid_t nr = task_pid_nr(task);
 	struct task_struct *t;
 
 	if (!files)
 		return true;	/* exiting: nothing to walk */
 
 	for_each_thread(task, t) {
-		if (t != task && READ_ONCE(t->files) == files &&
-		    task_pid_nr(t) < nr)
+		pid_t tnr = task_pid_nr(t);
+
+		if (t != task && tnr && tnr < nr &&
+		    READ_ONCE(t->files) == files &&
+		    READ_ONCE(t->start_boottime) < walk_start)
 			return true;
 	}
 	return false;
@@ -783,12 +806,15 @@ static bool devres_fd_table_covered(struct task_struct *task)
  *
  * Holding that file reference means that if the owner closes the file
  * meanwhile, the final fput() (and so the driver's release callback) runs
- * from this task's task work instead of the owner's close(). The file was
- * reported either way; only where its release runs moves.
+ * from this context's deferred fput (task work, or the delayed-fput work
+ * item when called from a kthread such as the deferred-probe worker)
+ * instead of the owner's close(). The file was reported either way; only
+ * where its release runs moves.
  */
 void devres_check_open_files(struct device *dev)
 {
 	struct devres_region *regions = NULL;
+	u64 walk_start = ktime_get_boottime_ns();
 	unsigned int nr, tid = 0;
 
 	might_sleep();
@@ -803,6 +829,7 @@ void devres_check_open_files(struct device *dev)
 		struct file *file;
 		unsigned int fd = 0;
 		struct pid *pid;
+		pid_t pnr;
 
 		rcu_read_lock();
 		pid = find_ge_pid(tid, &init_pid_ns);
@@ -810,9 +837,10 @@ void devres_check_open_files(struct device *dev)
 			rcu_read_unlock();
 			break;
 		}
-		tid = pid_nr(pid) + 1;
+		pnr = pid_nr(pid);
+		tid = pnr + 1;
 		task = pid_task(pid, PIDTYPE_PID);
-		if (task && !devres_fd_table_covered(task))
+		if (task && !devres_fd_table_covered(task, pnr, walk_start))
 			get_task_struct(task);
 		else
 			task = NULL;
@@ -821,7 +849,8 @@ void devres_check_open_files(struct device *dev)
 			continue;
 
 		while ((file = fget_task_next(task, &fd))) {
-			devres_check_one_file(dev, regions, nr, task, fd, file);
+			devres_check_one_file(dev, regions, nr, task, pnr, fd,
+					      file);
 			fput(file);
 			fd++;
 		}
@@ -1309,19 +1338,8 @@ void *devm_krealloc(struct device *dev, void *ptr, size_t new_size, gfp_t gfp)
 	 * If new size is smaller or equal to the actual number of bytes
 	 * allocated previously - just return the same pointer.
 	 */
-	if (total_new_size <= total_old_size) {
-		/*
-		 * Keep the recorded size from under-stating what the caller
-		 * may now use (debugging aids read it). Never shrink it: the
-		 * slack is freed with the chunk, so over-stating is harmless.
-		 */
-		old_dr = container_of(ptr, struct devres, data);
-		spin_lock_irqsave(&dev->devres_lock, flags);
-		if (new_size > old_dr->node.size)
-			old_dr->node.size = new_size;
-		spin_unlock_irqrestore(&dev->devres_lock, flags);
+	if (total_new_size <= total_old_size)
 		return ptr;
-	}
 
 	/*
 	 * Otherwise: allocate new, larger chunk. We need to allocate before

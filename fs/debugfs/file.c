@@ -1387,12 +1387,17 @@ static bool debugfs_unsafe_fops_safe_after_removal(const struct file_operations 
 		return true;
 	if (fops == &u32_array_fops)	/* copies the array at open */
 		return true;
-	/* DEFINE_DEBUGFS_ATTRIBUTE(): read/write go through debugfs_file_get() */
+	/*
+	 * DEFINE_DEBUGFS_ATTRIBUTE(): read/write go through
+	 * debugfs_file_get(), release only frees the simple_attr, and
+	 * the macro sets no other operation.
+	 */
 	return fops->read == debugfs_attr_read &&
 	       (fops->write == debugfs_attr_write ||
 		fops->write == debugfs_attr_write_signed) &&
-	       !fops->unlocked_ioctl && !fops->compat_ioctl && !fops->poll &&
-	       !fops->mmap;
+	       fops->release == simple_attr_release &&
+	       !fops->llseek && !fops->unlocked_ioctl && !fops->compat_ioctl &&
+	       !fops->poll && !fops->mmap;
 }
 
 /**

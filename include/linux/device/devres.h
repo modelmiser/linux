@@ -297,7 +297,7 @@ struct file_operations;
  * @name: label for reports, e.g. "video_devdata"
  * @holder: returns the object an open @fops file keeps alive, or NULL
  *
- * CONFIG_DEBUG_DEVRES_REFS checks, on driver unbind, whether any open file
+ * CONFIG_DEBUG_DEVRES_REFS checks, on driver unbind or a failed probe, whether any open file
  * still points into memory devres is about to free. A subsystem whose files
  * do not reach that object through file->private_data or the inode's
  * i_private registers one of these. @holder is called in process context,
@@ -328,7 +328,10 @@ static inline int devres_register_open_file_hook(struct devres_open_file_hook *h
 {
 	return 0;
 }
-static inline void devres_unregister_open_file_hook(struct devres_open_file_hook *hook) {}
+
+static inline void devres_unregister_open_file_hook(struct devres_open_file_hook *hook)
+{
+}
 #endif
 
 #endif /* _DEVICE_DEVRES_H_ */
